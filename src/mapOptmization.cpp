@@ -22,6 +22,7 @@
 #include <GeographicLib/LocalCartesian.hpp>
 
 #include "Scancontext.h"
+#include <nav_msgs/msg/occupancy_grid.hpp>
 
 using namespace gtsam;
 
@@ -164,6 +165,23 @@ public:
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
+    // 코스트맵 관련 변수
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_pub_;
+    double costmap_resolution_;
+    double costmap_width_;
+    double costmap_height_;
+    double min_height_threshold_;
+    double max_height_threshold_;
+    int obstacle_threshold_;
+    int point_threshold_;
+    double height_diff_threshold_;
+    std::string base_frame_id_;
+    int costmap_width_cells_;
+    int costmap_height_cells_;
+    bool auto_resize_map_;
+    float costmap_origin_x_;
+    float costmap_origin_y_;
+
     mapOptimization(const rclcpp::NodeOptions & options) : ParamServer("liorf_mapOptimization", options)
     {
         ISAM2Params parameters;
@@ -206,6 +224,32 @@ public:
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
         allocateMemory();
+
+        // 코스트맵 발행자 관련 파라미터 초기화
+        costmap_resolution_ = this->declare_parameter<double>("costmap_resolution", 0.1);
+        costmap_width_ = this->declare_parameter<double>("costmap_width", 10.0);       // 초기 맵 크기를 10m로 축소
+        costmap_height_ = this->declare_parameter<double>("costmap_height", 10.0);     // 초기 맵 크기를 10m로 축소
+        min_height_threshold_ = this->declare_parameter<double>("min_height_threshold", -0.5);
+        max_height_threshold_ = this->declare_parameter<double>("max_height_threshold", 1.0);
+        obstacle_threshold_ = this->declare_parameter<int>("obstacle_threshold", 10);
+        point_threshold_ = this->declare_parameter<int>("point_threshold", 5);
+        height_diff_threshold_ = this->declare_parameter<double>("height_diff_threshold", 0.2);
+        base_frame_id_ = this->declare_parameter<std::string>("base_frame_id", "base_link");
+        auto_resize_map_ = this->declare_parameter<bool>("auto_resize_map", true);
+        
+        // 코스트맵 크기 계산
+        costmap_width_cells_ = static_cast<int>(costmap_width_ / costmap_resolution_);
+        costmap_height_cells_ = static_cast<int>(costmap_height_ / costmap_resolution_);
+        
+        // 코스트맵 원점 초기화 (맵의 중심이 로봇 위치가 되도록)
+        costmap_origin_x_ = -costmap_width_ / 2;
+        costmap_origin_y_ = -costmap_height_ / 2;
+        
+        // 코스트맵 발행자 생성
+        costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/liorf/costmap", 10);
+        
+        RCLCPP_INFO(this->get_logger(), "Costmap integration initialized with resolution: %.2f, center origin: (%.2f, %.2f)", 
+                   costmap_resolution_, costmap_origin_x_, costmap_origin_y_);
     }
 
     void allocateMemory()
@@ -1748,8 +1792,7 @@ public:
     void updatePath(const PointTypePose& pose_in)
     {
         geometry_msgs::msg::PoseStamped pose_stamped;
-        rclcpp::Time t(static_cast<uint32_t>(pose_in.time * 1e9));
-        pose_stamped.header.stamp = t;
+        pose_stamped.header.stamp = this->now();
         pose_stamped.header.frame_id = odometryFrame;
         pose_stamped.pose.position.x = pose_in.x;
         pose_stamped.pose.position.y = pose_in.y;
@@ -1899,6 +1942,410 @@ public:
             // }
         }
     }
+
+    // 맵 크기 자동 조정 함수
+    void updateMapSize(const pcl::PointCloud<PointType>::Ptr& cloud)
+    {
+        if (!auto_resize_map_) return;
+        
+        static float global_min_x = std::numeric_limits<float>::max();
+        static float global_max_x = -std::numeric_limits<float>::max();
+        static float global_min_y = std::numeric_limits<float>::max();
+        static float global_max_y = -std::numeric_limits<float>::max();
+        static bool origin_initialized = false;  // 원점 초기화 여부
+        static float initial_origin_x = 0.0f;   // 초기 원점 x
+        static float initial_origin_y = 0.0f;   // 초기 원점 y
+        
+        // 현재 포인트 클라우드의 범위 계산
+        float min_x = std::numeric_limits<float>::max();
+        float max_x = -std::numeric_limits<float>::max();
+        float min_y = std::numeric_limits<float>::max();
+        float max_y = -std::numeric_limits<float>::max();
+        
+        for (const auto& point : cloud->points)
+        {
+            min_x = std::min(min_x, point.x);
+            max_x = std::max(max_x, point.x);
+            min_y = std::min(min_y, point.y);
+            max_y = std::max(max_y, point.y);
+        }
+        
+        // 글로벌 맵 경계 업데이트
+        bool updated = false;
+        if (min_x < global_min_x) {
+            global_min_x = min_x;
+            updated = true;
+            RCLCPP_DEBUG(this->get_logger(), "Updated min_x: %.2f", global_min_x);
+        }
+        if (max_x > global_max_x) {
+            global_max_x = max_x;
+            updated = true;
+            RCLCPP_DEBUG(this->get_logger(), "Updated max_x: %.2f", global_max_x);
+        }
+        if (min_y < global_min_y) {
+            global_min_y = min_y;
+            updated = true;
+            RCLCPP_DEBUG(this->get_logger(), "Updated min_y: %.2f", global_min_y);
+        }
+        if (max_y > global_max_y) {
+            global_max_y = max_y;
+            updated = true;
+            RCLCPP_DEBUG(this->get_logger(), "Updated max_y: %.2f", global_max_y);
+        }
+        
+        // 경계가 업데이트되지 않았으면 추가 확인
+        if (!updated) {
+            // 모든 키포즈 검사를 통한 추가 검증 (전체 경로 포함)
+            if (cloudKeyPoses3D && !cloudKeyPoses3D->points.empty()) {
+                float poses_min_x = std::numeric_limits<float>::max();
+                float poses_max_x = -std::numeric_limits<float>::max();
+                float poses_min_y = std::numeric_limits<float>::max();
+                float poses_max_y = -std::numeric_limits<float>::max();
+                
+                for (const auto& point : cloudKeyPoses3D->points) {
+                    poses_min_x = std::min(poses_min_x, point.x);
+                    poses_max_x = std::max(poses_max_x, point.x);
+                    poses_min_y = std::min(poses_min_y, point.y);
+                    poses_max_y = std::max(poses_max_y, point.y);
+                }
+                
+                if (poses_min_x < global_min_x) { global_min_x = poses_min_x; updated = true; }
+                if (poses_max_x > global_max_x) { global_max_x = poses_max_x; updated = true; }
+                if (poses_min_y < global_min_y) { global_min_y = poses_min_y; updated = true; }
+                if (poses_max_y > global_max_y) { global_max_y = poses_max_y; updated = true; }
+                
+                if (updated) {
+                    RCLCPP_INFO(this->get_logger(), "Updated map bounds from key poses: x[%.2f, %.2f], y[%.2f, %.2f]", 
+                               poses_min_x, poses_max_x, poses_min_y, poses_max_y);
+                }
+            }
+        }
+        
+        // 맵 확장 검증 - 업데이트된 값이 유효한지 확인
+        if (global_min_x > global_max_x || global_min_y > global_max_y) {
+            RCLCPP_WARN(this->get_logger(), "Invalid map bounds: x[%.2f, %.2f], y[%.2f, %.2f], resetting", 
+                       global_min_x, global_max_x, global_min_y, global_max_y);
+            global_min_x = -5.0;
+            global_max_x = 5.0;
+            global_min_y = -5.0;
+            global_max_y = 5.0;
+            updated = true;
+        }
+        
+        // 방향별 비대칭 확장 버퍼 적용 (로봇의 이동 방향에 따라)
+        float buffer_x = 10.0f; // 기본 버퍼 사이즈를 10m로 축소
+        float buffer_y = 10.0f; // 기본 버퍼 사이즈를 10m로 축소
+        
+        // 영역 계산 (중앙 원점 기준으로 정사각형)
+        float map_min_x = global_min_x - buffer_x;
+        float map_max_x = global_max_x + buffer_x;
+        float map_min_y = global_min_y - buffer_y;
+        float map_max_y = global_max_y + buffer_y;
+        
+        // 초기 원점 설정 (첫 번째 맵 생성 시에만)
+        if (!origin_initialized && cloudKeyPoses3D) {
+            // 로봇 중심으로 맵 원점 설정 (로봇은 항상 맵 중앙에 위치)
+            initial_origin_x = -costmap_width_ / 2;  // 로봇 위치가 (0,0)이므로 맵 중앙에 오도록 설정
+            initial_origin_y = -costmap_height_ / 2;
+            costmap_origin_x_ = initial_origin_x;
+            costmap_origin_y_ = initial_origin_y;
+            origin_initialized = true;
+            RCLCPP_INFO(this->get_logger(), "Map origin initialized to (%.2f, %.2f) - robot centered", 
+                       costmap_origin_x_, costmap_origin_y_);
+        }
+        
+        // 맵 크기 계산 (방향별로 확장 지원, 축소는 안 함)
+        // 맵 원점 기준의 필요 크기 계산 (x 방향)
+        float required_x_min = std::min(map_min_x - buffer_x, static_cast<float>(costmap_origin_x_));
+        float required_x_max = std::max(map_max_x + buffer_x, static_cast<float>(costmap_origin_x_ + costmap_width_));
+        float new_width = required_x_max - required_x_min;
+        
+        // 맵 원점 기준의 필요 크기 계산 (y 방향)
+        float required_y_min = std::min(map_min_y - buffer_y, static_cast<float>(costmap_origin_y_));
+        float required_y_max = std::max(map_max_y + buffer_y, static_cast<float>(costmap_origin_y_ + costmap_height_));
+        float new_height = required_y_max - required_y_min;
+        
+        // 맵 크기가 변경되었는지 확인
+        bool size_changed = false;
+        
+        // 맵 크기나 원점이 변경되었을 때만 업데이트
+        if (new_width > costmap_width_ || required_x_min < costmap_origin_x_) {
+            // x 방향으로 확장이 필요한 경우
+            float old_origin_x = costmap_origin_x_;
+            costmap_origin_x_ = required_x_min;
+            costmap_width_ = new_width;
+            costmap_width_cells_ = static_cast<int>(costmap_width_ / costmap_resolution_);
+            size_changed = true;
+            
+            RCLCPP_DEBUG(this->get_logger(), "X-axis map update: origin: %.2f -> %.2f, width: %.2f -> %.2f", 
+                        old_origin_x, costmap_origin_x_, old_origin_x + costmap_width_, costmap_origin_x_ + costmap_width_);
+        }
+        
+        if (new_height > costmap_height_ || required_y_min < costmap_origin_y_) {
+            // y 방향으로 확장이 필요한 경우
+            float old_origin_y = costmap_origin_y_;
+            costmap_origin_y_ = required_y_min;
+            costmap_height_ = new_height;
+            costmap_height_cells_ = static_cast<int>(costmap_height_ / costmap_resolution_);
+            size_changed = true;
+            
+            RCLCPP_DEBUG(this->get_logger(), "Y-axis map update: origin: %.2f -> %.2f, height: %.2f -> %.2f", 
+                        old_origin_y, costmap_origin_y_, old_origin_y + costmap_height_, costmap_origin_y_ + costmap_height_);
+        }
+        
+        // 원점은 고정 (초기화 후에는 거의 변경하지 않음)
+        // 로그에 전체 커버되는 영역 표시 (맵 크기가 변경되었을 때만)
+        if (size_changed || updated) {
+            RCLCPP_INFO(this->get_logger(), "Global map range updated: x[%.1f, %.1f], y[%.1f, %.1f], size: %.1fm x %.1fm, origin: (%.1f, %.1f)", 
+                    global_min_x, global_max_x, global_min_y, global_max_y,
+                    costmap_width_, costmap_height_, costmap_origin_x_, costmap_origin_y_);
+        }
+    }
+
+    // 코스트맵 생성 및 발행 함수 (별도 스레드에서 실행)
+    void costmapThread()
+    {
+        rclcpp::Rate rate(0.3); // 약 3.3초마다 갱신 (0.3Hz)
+        
+        // 다운샘플링 필터 설정
+        pcl::VoxelGrid<PointType> downSizeFilterMap;
+        downSizeFilterMap.setLeafSize(0.3, 0.3, 0.3); // 30cm 해상도로 필터링 (성능 향상)
+        
+        while (rclcpp::ok())
+        {
+            rate.sleep();
+            
+            pcl::PointCloud<PointType>::Ptr merged_cloud(new pcl::PointCloud<PointType>());
+            
+            {
+                std::lock_guard<std::mutex> lock(mtx); // 뮤텍스 잠금으로 데이터 보호
+                
+                if (cloudKeyPoses3D->points.empty() || surfCloudKeyFrames.empty())
+                    continue;
+                
+                // 맵 경계/영역 계산을 위해 모든 키포즈 포인트 직접 전달
+                updateMapSize(cloudKeyPoses3D);
+                
+                // 키프레임 데이터 처리
+                size_t frameCount = surfCloudKeyFrames.size();
+                
+                // 모든 데이터를 사용하면 너무 느리므로 샘플링 방식 사용
+                // 첫 프레임과 현재 프레임은 항상 포함
+                PointTypePose firstPose = cloudKeyPoses6D->points[0];
+                pcl::PointCloud<PointType>::Ptr first_cloud = transformPointCloud(surfCloudKeyFrames[0], &firstPose);
+                *merged_cloud += *first_cloud;
+                
+                // 마지막 프레임
+                PointTypePose lastPose = cloudKeyPoses6D->points[frameCount - 1];
+                pcl::PointCloud<PointType>::Ptr last_cloud = transformPointCloud(surfCloudKeyFrames[frameCount - 1], &lastPose);
+                *merged_cloud += *last_cloud;
+                
+                // 균등 분포로 추가 프레임 선택 (최대 300개)
+                int max_samples = 300;
+                int step = std::max(1, static_cast<int>(frameCount / max_samples));
+                size_t includedFrames = 0;
+                
+                // 가장 최근 N개 프레임은 무조건 포함
+                int recent_frames = std::min(50, static_cast<int>(frameCount));
+                for (int i = frameCount - recent_frames; i < static_cast<int>(frameCount) - 1; i++) {
+                    if (i <= 0) continue; // 첫 프레임은 이미 포함됨
+                    
+                    PointTypePose pose = cloudKeyPoses6D->points[i];
+                    pcl::PointCloud<PointType>::Ptr transformed_cloud = transformPointCloud(surfCloudKeyFrames[i], &pose);
+                    *merged_cloud += *transformed_cloud;
+                    includedFrames++;
+                }
+                
+                // 나머지는 균등 샘플링
+                for (int i = 1; i < static_cast<int>(frameCount) - recent_frames; i += step) {
+                    PointTypePose pose = cloudKeyPoses6D->points[i];
+                    pcl::PointCloud<PointType>::Ptr transformed_cloud = transformPointCloud(surfCloudKeyFrames[i], &pose);
+                    *merged_cloud += *transformed_cloud;
+                    includedFrames++;
+                }
+                
+                // 최대 범위 키프레임 강제 포함 (맵 경계 생성에 도움)
+                if (cloudKeyPoses3D->points.size() > 1) {
+                    // x 축 최소/최대 값을 가진 포즈 찾기
+                    float min_x = std::numeric_limits<float>::max();
+                    float max_x = -std::numeric_limits<float>::max();
+                    float min_y = std::numeric_limits<float>::max();
+                    float max_y = -std::numeric_limits<float>::max();
+                    int min_x_idx = 0, max_x_idx = 0, min_y_idx = 0, max_y_idx = 0;
+                    
+                    for (size_t i = 0; i < cloudKeyPoses3D->points.size(); i++) {
+                        if (cloudKeyPoses3D->points[i].x < min_x) {
+                            min_x = cloudKeyPoses3D->points[i].x;
+                            min_x_idx = i;
+                        }
+                        if (cloudKeyPoses3D->points[i].x > max_x) {
+                            max_x = cloudKeyPoses3D->points[i].x;
+                            max_x_idx = i;
+                        }
+                        if (cloudKeyPoses3D->points[i].y < min_y) {
+                            min_y = cloudKeyPoses3D->points[i].y;
+                            min_y_idx = i;
+                        }
+                        if (cloudKeyPoses3D->points[i].y > max_y) {
+                            max_y = cloudKeyPoses3D->points[i].y;
+                            max_y_idx = i;
+                        }
+                    }
+                    
+                    // 경계 포인트 추가 (이미 포함되지 않은 경우)
+                    std::vector<int> boundary_indices = {min_x_idx, max_x_idx, min_y_idx, max_y_idx};
+                    for (int idx : boundary_indices) {
+                        if (idx > 0 && idx < static_cast<int>(frameCount) && idx != 0 && idx != static_cast<int>(frameCount - 1)) {
+                            PointTypePose pose = cloudKeyPoses6D->points[idx];
+                            pcl::PointCloud<PointType>::Ptr transformed_cloud = transformPointCloud(surfCloudKeyFrames[idx], &pose);
+                            *merged_cloud += *transformed_cloud;
+                            includedFrames++;
+                        }
+                    }
+                }
+                
+                RCLCPP_INFO(this->get_logger(), "Costmap update: using %ld/%ld frames (step=%d), current map: %.1fm x %.1fm", 
+                           includedFrames + 2, frameCount, step, costmap_width_, costmap_height_);
+            }
+            
+            // 포인트가 부족하면 반환
+            if (merged_cloud->points.empty())
+                continue;
+            
+            // 다운샘플링으로 포인트 수 줄이기
+            pcl::PointCloud<PointType>::Ptr downsampled_cloud(new pcl::PointCloud<PointType>());
+            downSizeFilterMap.setInputCloud(merged_cloud);
+            downSizeFilterMap.filter(*downsampled_cloud);
+            
+            // 글로벌 맵 최신 버전 사용
+            pcl::PointCloud<PointType>::Ptr filtered_cloud(new pcl::PointCloud<PointType>());
+            
+            // 병합된 맵에서 높이에 따른 필터링
+            for (const auto& point : downsampled_cloud->points)
+            {
+                if (point.z >= min_height_threshold_ && point.z <= max_height_threshold_)
+                {
+                    filtered_cloud->push_back(point);
+                }
+            }
+            
+            // 그리드 셀 초기화
+            std::vector<std::vector<std::vector<float>>> grid_points(
+                costmap_width_cells_, std::vector<std::vector<float>>(
+                    costmap_height_cells_, std::vector<float>()));
+            
+            // 포인트 클라우드를 그리드로 투영
+            for (const auto& point : filtered_cloud->points)
+            {
+                // 그리드 좌표 계산 (맵 원점 고려)
+                int grid_x = static_cast<int>((point.x - costmap_origin_x_) / costmap_resolution_);
+                int grid_y = static_cast<int>((point.y - costmap_origin_y_) / costmap_resolution_);
+                
+                // 그리드 범위 내에 있는지 확인
+                if (grid_x >= 0 && grid_x < costmap_width_cells_ && 
+                    grid_y >= 0 && grid_y < costmap_height_cells_)
+                {
+                    grid_points[grid_x][grid_y].push_back(point.z);
+                }
+            }
+            
+            // 점유 그리드 메시지 생성
+            auto grid_msg = std::make_unique<nav_msgs::msg::OccupancyGrid>();
+            grid_msg->header.stamp = this->now();
+            grid_msg->header.frame_id = "map";
+            grid_msg->info.resolution = costmap_resolution_;
+            grid_msg->info.width = costmap_width_cells_;
+            grid_msg->info.height = costmap_height_cells_;
+            
+            // 로봇 중심 좌표계로 설정 (맵 발행 시점의 원점 설정)
+            grid_msg->info.origin.position.x = costmap_origin_x_;
+            grid_msg->info.origin.position.y = costmap_origin_y_;
+            grid_msg->info.origin.position.z = 0.0;
+            grid_msg->info.origin.orientation.w = 1.0;
+            
+            // 데이터 크기 초기화 (-1: 알 수 없음)
+            grid_msg->data.resize(costmap_width_cells_ * costmap_height_cells_, -1);
+            
+            // 그리드 셀의 점유 확률 결정
+            for (int i = 0; i < costmap_width_cells_; ++i)
+            {
+                for (int j = 0; j < costmap_height_cells_; ++j)
+                {
+                    auto& cell_points = grid_points[i][j];
+                    int idx = j * costmap_width_cells_ + i;
+                    
+                    if (cell_points.empty())
+                    {
+                        // 포인트가 없으면 알 수 없음(-1)으로 유지
+                        continue;
+                    }
+                    
+                    // 포인트 수와 높이 차이 확인
+                    size_t num_points = cell_points.size();
+                    if (num_points < static_cast<size_t>(point_threshold_))
+                    {
+                        // 포인트가 적으면 자유 공간(0)
+                        grid_msg->data[idx] = 0;
+                        continue;
+                    }
+                    
+                    // 최대 높이 차이 계산
+                    float min_z = *std::min_element(cell_points.begin(), cell_points.end());
+                    float max_z = *std::max_element(cell_points.begin(), cell_points.end());
+                    float height_diff = max_z - min_z;
+                    
+                    if (height_diff > height_diff_threshold_)
+                    {
+                        // 높이 차이가 크면 장애물(100)
+                        grid_msg->data[idx] = 100;
+                    }
+                    else if (num_points > static_cast<size_t>(obstacle_threshold_))
+                    {
+                        // 포인트가 많으면 장애물(100)
+                        grid_msg->data[idx] = 100;
+                    }
+                    else
+                    {
+                        // 포인트가 약간 있지만 많지 않으면 자유 공간(0)
+                        grid_msg->data[idx] = 0;
+                    }
+                }
+            }
+            
+            // 로봇 위치를 표시 (맵의 중앙)
+            int robot_grid_x = static_cast<int>((0.0 - costmap_origin_x_) / costmap_resolution_);
+            int robot_grid_y = static_cast<int>((0.0 - costmap_origin_y_) / costmap_resolution_);
+            
+            // 로봇 주변에 마커 표시 (중심에 있는지 확인용)
+            if (robot_grid_x >= 0 && robot_grid_x < costmap_width_cells_ && 
+                robot_grid_y >= 0 && robot_grid_y < costmap_height_cells_)
+            {
+                int idx = robot_grid_y * costmap_width_cells_ + robot_grid_x;
+                grid_msg->data[idx] = 100; // 로봇 위치에 장애물 표시
+                
+                // 로봇 주변 십자가 표시
+                for (int offset = 1; offset <= 2; offset++) {
+                    if (robot_grid_x + offset < costmap_width_cells_) {
+                        grid_msg->data[robot_grid_y * costmap_width_cells_ + (robot_grid_x + offset)] = 100;
+                    }
+                    if (robot_grid_x - offset >= 0) {
+                        grid_msg->data[robot_grid_y * costmap_width_cells_ + (robot_grid_x - offset)] = 100;
+                    }
+                    if (robot_grid_y + offset < costmap_height_cells_) {
+                        grid_msg->data[(robot_grid_y + offset) * costmap_width_cells_ + robot_grid_x] = 100;
+                    }
+                    if (robot_grid_y - offset >= 0) {
+                        grid_msg->data[(robot_grid_y - offset) * costmap_width_cells_ + robot_grid_x] = 100;
+                    }
+                }
+            }
+            
+            // 코스트맵 발행
+            costmap_pub_->publish(std::move(grid_msg));
+            RCLCPP_INFO(this->get_logger(), "Costmap updated: %dx%d cells (%.1fm x %.1fm)", 
+                       costmap_width_cells_, costmap_height_cells_, costmap_width_, costmap_height_);
+        }
+    }
 };
 
 
@@ -1917,6 +2364,7 @@ int main(int argc, char** argv)
 
     std::thread loopthread(&mapOptimization::loopClosureThread, MO);
     std::thread visualizeMapThread(&mapOptimization::visualizeGlobalMapThread, MO);
+    std::thread costmapThread(&mapOptimization::costmapThread, MO);
 
     exec.spin();
 
@@ -1924,6 +2372,7 @@ int main(int argc, char** argv)
 
     loopthread.join();
     visualizeMapThread.join();
+    costmapThread.join();
 
     return 0;
 }

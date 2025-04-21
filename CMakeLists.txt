@@ -5,8 +5,6 @@ set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g -pthread")
 
-include(cmake/rosidl_get_typesupport_target.cmake)
-
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -42,7 +40,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SaveMap.srv"
   DEPENDENCIES std_msgs sensor_msgs
 )
-rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
+
+# ROS2 버전에 따른 처리
+if(${rosidl_cmake_VERSION} VERSION_LESS "2.5.0")
+  set(cpp_typesupport_target "${PROJECT_NAME}__rosidl_typesupport_cpp")
+else()
+  rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+endif()
 
 # include directories
 include_directories(

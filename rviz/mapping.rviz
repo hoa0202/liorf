@@ -8,6 +8,7 @@ Panels:
         - /Mapping1
         - /Mapping1/LIO1/Topic1
         - /Image1
+        - /Map1
       Splitter Ratio: 0.5
     Tree Height: 1003
   - Class: rviz_common/Views
@@ -252,27 +253,26 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
-        base_link:
-          livox_frame:
-            {}
-          os_sensor:
-            os_imu:
-              {}
-            os_lidar:
-              {}
-          zed_camera_link:
-            zed_camera_center:
-              zed_left_camera_frame:
-                zed_imu_link:
-                  {}
-                zed_left_camera_optical_frame:
-                  {}
-              zed_right_camera_frame:
-                zed_right_camera_optical_frame:
-                  {}
         map:
           odom:
-            {}
+            base_link:
+              livox_frame:
+                {}
+              os_sensor:
+                os_imu:
+                  {}
+                os_lidar:
+                  {}
+              zed_camera_link:
+                zed_camera_center:
+                  zed_left_camera_frame:
+                    zed_imu_link:
+                      {}
+                    zed_left_camera_optical_frame:
+                      {}
+                  zed_right_camera_frame:
+                    zed_right_camera_optical_frame:
+                      {}
       Update Interval: 0
       Value: true
     - Angle Tolerance: 0.10000000149011612
@@ -327,6 +327,20 @@ Visualization Manager:
         Value: /liorf/mapping/loop_closure_constraints
       Value: false
     - Class: rviz_default_plugins/Image
+      Enabled: false
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Image
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /zed/zed_node/rgb/image_rect_color
+      Value: false
+    - Class: rviz_default_plugins/Image
       Enabled: true
       Max Value: 1
       Median window: 5
@@ -340,20 +354,6 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /zed/zed_node/rgb/image_rect_color
       Value: true
-    - Class: rviz_default_plugins/Image
-      Enabled: false
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: Image
-      Normalize Range: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /range_image
-      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -478,6 +478,27 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /est_path
       Value: false
+    - Alpha: 0.699999988079071
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /liorf/costmap
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /liorf/costmap_updates
+      Use Timestamp: false
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -521,25 +542,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 8.177661895751953
+      Distance: 80.98637390136719
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.1353457272052765
-        Y: 0.6277161240577698
-        Z: 0.2470761090517044
+        X: 4.05830717086792
+        Y: 5.899341583251953
+        Z: 1.4002182483673096
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5747973322868347
+      Pitch: 1.5697963237762451
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 4.7036824226379395
+      Yaw: 4.683682918548584
     Saved: ~
 Window Geometry:
   Displays:
