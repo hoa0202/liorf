@@ -79,7 +79,7 @@ ament_target_dependencies(${PROJECT_NAME}_imageProjection ${ros2_lib})
 target_link_libraries(${PROJECT_NAME}_imageProjection "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
 
 # # Mapping Optimization
-add_executable(${PROJECT_NAME}_mapOptmization src/mapOptmization.cpp ${common_lib} include/Scancontext.cpp)
+add_executable(${PROJECT_NAME}_mapOptmization src/mapOptmization.cpp src/costmap.cpp ${common_lib} include/Scancontext.cpp)
 target_compile_options(${PROJECT_NAME}_mapOptmization PRIVATE ${OpenMP_CXX_FLAGS})
 ament_target_dependencies(${PROJECT_NAME}_mapOptmization ${ros2_lib})
 target_link_libraries(${PROJECT_NAME}_mapOptmization Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam)

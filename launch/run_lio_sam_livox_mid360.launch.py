@@ -54,15 +54,15 @@ def generate_launch_description():
             parameters=[parameter_file],
             output='screen'
         ),
-        Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='static_tf_base_to_livox',
-            arguments=['--x', '0.23', '--y', '0', '--z', '0.805',
-                       '--qx', '0', '--qy', '0', '--qz', '0', '--qw', '1',
-                       '--frame-id', 'base_link', '--child-frame-id', 'livox_frame'],
-            output='screen'
-        ),        
+        # Node(
+        #     package='tf2_ros',
+        #     executable='static_transform_publisher',
+        #     name='static_tf_base_to_livox',
+        #     arguments=['--x', '0.23', '--y', '0', '--z', '0.805',
+        #                '--qx', '0', '--qy', '0', '--qz', '0', '--qw', '1',
+        #                '--frame-id', 'base_link', '--child-frame-id', 'livox_frame'],
+        #     output='screen'
+        # ),        
         Node(
             package='liorf',
             executable='liorf_imuPreintegration',
@@ -92,13 +92,13 @@ def generate_launch_description():
             name='liorf_mapOptmization',
             parameters=[parameter_file, {
                 'costmap_resolution': 0.1,        # 격자 해상도 (m)
-                'costmap_width': 1.0,            # 초기 맵 폭 (m)
-                'costmap_height': 1.0,           # 초기 맵 높이 (m)
-                'min_height_threshold': 0.3,      # 포인트 클라우드 최소 높이 임계값 (m)
-                'max_height_threshold': 2.5,      # 포인트 클라우드 최대 높이 임계값 (m)
-                'obstacle_threshold': 1,          # 장애물로 판단할 최소 포인트 수
-                'point_threshold': 3,             # 그리드 셀 처리를 위한 최소 포인트 수
-                'height_diff_threshold': 0.3,     # 장애물 판단 높이 차이 임계값 (m)
+                'costmap_width': 1.0, # 수정금지 1.0 고정           # 초기 맵 폭 (m)
+                'costmap_height': 1.0, # 수정금지 1.0 고정           # 초기 맵 높이 (m)
+                'min_height_threshold': 0.15,      # 포인트 클라우드 최소 높이 임계값 (m)
+                'max_height_threshold': 1.1,      # 포인트 클라우드 최대 높이 임계값 (m) - 2.0보다 더 높게 설정
+                'obstacle_threshold': 2,          # 장애물로 판단할 최소 포인트 수 - 민감도 높임
+                'point_threshold': 1,             # 그리드 셀 처리를 위한 최소 포인트 수
+                'height_diff_threshold': 0.01,     # 장애물 판단 높이 차이 임계값 (m)
                 'base_frame_id': 'base_link',     # 베이스 프레임 ID
                 'auto_resize_map': True           # 맵 자동 크기 조정 활성화
             }],
