@@ -286,29 +286,28 @@ public:
     {
         // extract time stamp
         timeLaserInfoStamp = msgIn->header.stamp;
-        timeLaserInfoCur = ROS_TIME(msgIn->header.stamp);
+        timeLaserInfoCur = msgIn->header.stamp.sec + msgIn->header.stamp.nanosec * 1e-9;
 
         // extract info and feature cloud
         cloudInfo = *msgIn;
+        
+        // 메모리 효율성을 위해 클라우드 복사 전 clear 수행
+        if (laserCloudSurfLast) laserCloudSurfLast->clear();
+        
         pcl::fromROSMsg(msgIn->cloud_deskewed, *laserCloudSurfLast);
-
-        // TODO
-        // ......
-        // remapping
-        // ......
-        // END
 
         std::lock_guard<std::mutex> lock(mtx);
 
         static double timeLastProcessing = -1;
-        if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval)
-        {
+        if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval) {
             timeLastProcessing = timeLaserInfoCur;
 
             updateInitialGuess();
 
+            // 주변 키프레임 추출 - 함수 복원
             extractSurroundingKeyFrames();
 
+            // 포인트 클라우드 다운샘플링으로 메모리 사용량 및 계산량 감소
             downsampleCurrentScan();
 
             scan2MapOptimization();
@@ -316,6 +315,9 @@ public:
             saveKeyFramesAndFactor();
 
             correctPoses();
+
+            // 메모리 관리: 너무 오래된 프레임 제거
+            clearOldFrames();
 
             publishOdometry();
 
@@ -623,6 +625,16 @@ public:
         downSizeFilterGlobalMapKeyPoses.setLeafSize(globalMapVisualizationPoseDensity, globalMapVisualizationPoseDensity, globalMapVisualizationPoseDensity); // for global map visualization
         downSizeFilterGlobalMapKeyPoses.setInputCloud(globalMapKeyPoses);
         downSizeFilterGlobalMapKeyPoses.filter(*globalMapKeyPosesDS);
+        
+        // 최소 10개의 키프레임 표시 보장
+        if (globalMapKeyPosesDS->size() < 10 && cloudKeyPoses3D->size() > 10) {
+            globalMapKeyPosesDS->clear();
+            // 최근 10개 키프레임 추가
+            for (int i = std::max(0, (int)cloudKeyPoses3D->size() - 10); i < cloudKeyPoses3D->size(); ++i) {
+                globalMapKeyPosesDS->push_back(cloudKeyPoses3D->points[i]);
+            }
+        }
+        
         for(auto& pt : globalMapKeyPosesDS->points)
         {
             kdtreeGlobalMap->nearestKSearch(pt, 1, pointSearchIndGlobalMap, pointSearchSqDisGlobalMap);
@@ -631,11 +643,9 @@ public:
 
         // extract visualized and downsampled key frames
         for (int i = 0; i < (int)globalMapKeyPosesDS->size(); ++i){
-            if (common_lib_->pointDistance(globalMapKeyPosesDS->points[i], cloudKeyPoses3D->back()) > globalMapVisualizationSearchRadius)
-                continue;
             int thisKeyInd = (int)globalMapKeyPosesDS->points[i].intensity;
             // 오프셋을 고려한 변환 함수 사용
-            *globalMapKeyFrames += *transformPointCloudWithLidarOffset(surfCloudKeyFrames[thisKeyInd], &cloudKeyPoses6D->points[thisKeyInd]);
+            *globalMapKeyFrames += *transformPointCloud(surfCloudKeyFrames[thisKeyInd], &cloudKeyPoses6D->points[thisKeyInd]);
         }
         // downsample visualized points
         pcl::VoxelGrid<PointType> downSizeFilterGlobalMapKeyFrames; // for global map visualization
@@ -1189,17 +1199,69 @@ public:
 
     void extractSurroundingKeyFrames()
     {
-        if (cloudKeyPoses3D->points.empty() == true)
-            return; 
+        if (cloudKeyPoses3D->points.empty())
+            return;
         
-        // if (loopClosureEnableFlag == true)
-        // {
-        //     extractForLoopClosure();    
-        // } else {
-        //     extractNearby();
-        // }
+        // 주변 키프레임 추출 결과를 저장할 변수들 초기화
+        if (laserCloudSurfFromMap) laserCloudSurfFromMap->clear();
+        
+        // 추출 방식 변경: extractNearby 함수 내용으로 복원
+        pcl::PointCloud<PointType>::Ptr surroundingKeyPoses(new pcl::PointCloud<PointType>());
+        pcl::PointCloud<PointType>::Ptr surroundingKeyPosesDS(new pcl::PointCloud<PointType>());
+        std::vector<int> pointSearchInd;
+        std::vector<float> pointSearchSqDis;
 
-        extractNearby();
+        // extract all the nearby key poses and downsample them
+        kdtreeSurroundingKeyPoses->setInputCloud(cloudKeyPoses3D); // create kd-tree
+        kdtreeSurroundingKeyPoses->radiusSearch(cloudKeyPoses3D->back(), (double)surroundingKeyframeSearchRadius, pointSearchInd, pointSearchSqDis);
+        for (int i = 0; i < (int)pointSearchInd.size(); ++i)
+        {
+            int id = pointSearchInd[i];
+            surroundingKeyPoses->push_back(cloudKeyPoses3D->points[id]);
+        }
+
+        downSizeFilterSurroundingKeyPoses.setInputCloud(surroundingKeyPoses);
+        downSizeFilterSurroundingKeyPoses.filter(*surroundingKeyPosesDS);
+        for(auto& pt : surroundingKeyPosesDS->points)
+        {
+            kdtreeSurroundingKeyPoses->nearestKSearch(pt, 1, pointSearchInd, pointSearchSqDis);
+            pt.intensity = cloudKeyPoses3D->points[pointSearchInd[0]].intensity;
+        }
+
+        // also extract some latest key frames in case the robot rotates in one position
+        int numPoses = cloudKeyPoses3D->size();
+        for (int i = numPoses-1; i >= 0; --i)
+        {
+            if (timeLaserInfoCur - cloudKeyPoses6D->points[i].time < 10.0)
+                surroundingKeyPosesDS->push_back(cloudKeyPoses3D->points[i]);
+            else
+                break;
+        }
+
+        // 이후 extractCloud 함수 내용과 유사하게 변환
+        laserCloudSurfFromMap->clear(); 
+        for (int i = 0; i < (int)surroundingKeyPosesDS->size(); ++i)
+        {
+            int thisKeyInd = (int)surroundingKeyPosesDS->points[i].intensity;
+            if (laserCloudMapContainer.find(thisKeyInd) != laserCloudMapContainer.end()) 
+            {
+                // transformed cloud available
+                *laserCloudSurfFromMap += laserCloudMapContainer[thisKeyInd].second;
+            } 
+            else 
+            {
+                // transformed cloud not available
+                pcl::PointCloud<PointType> laserCloudCornerTemp;
+                pcl::PointCloud<PointType> laserCloudSurfTemp = *transformPointCloud(surfCloudKeyFrames[thisKeyInd], &cloudKeyPoses6D->points[thisKeyInd]);
+                *laserCloudSurfFromMap += laserCloudSurfTemp;
+                laserCloudMapContainer[thisKeyInd] = make_pair(laserCloudCornerTemp, laserCloudSurfTemp);
+            }
+        }
+
+        // 다운샘플링으로 포인트 클라우드 크기 줄이기
+        downSizeFilterLocalMapSurf.setInputCloud(laserCloudSurfFromMap);
+        downSizeFilterLocalMapSurf.filter(*laserCloudSurfFromMapDS);
+        laserCloudSurfFromMapDSNum = laserCloudSurfFromMapDS->size();
     }
 
     void downsampleCurrentScan()
@@ -2091,6 +2153,24 @@ public:
             
             // 생성된 코스트맵 발행
             costmap_pub_->publish(std::move(costmap));
+        }
+    }
+
+    // 메모리 관리를 위한 새로운 함수: 오래된 키프레임 관리
+    void clearOldFrames()
+    {
+        // 최대 키프레임 수 제한 (메모리 사용량 조절)
+        const int maxKeyframeSize = 1000;  // 1000 -> 800
+        
+        if (cloudKeyPoses6D->size() > maxKeyframeSize) {
+            // 조기 반환으로 불필요한 연산 방지
+            if (cloudKeyPoses6D->size() <= maxKeyframeSize + 50) return;
+            
+            // 맵 컨테이너에서만 가장 오래된 데이터 삭제 (정확도 유지)
+            for (int i = 0; i < 50; ++i) {
+                int oldestIdx = i;
+                laserCloudMapContainer.erase(oldestIdx);
+            }
         }
     }
 };
