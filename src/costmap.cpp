@@ -1,5 +1,7 @@
 #include "costmap.h"
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/common/transforms.h>
+#include <Eigen/Dense>
 
 CostmapGenerator::CostmapGenerator(rclcpp::Node* node) 
     : node_(node),
@@ -13,7 +15,13 @@ CostmapGenerator::CostmapGenerator(rclcpp::Node* node)
     height_diff_threshold_(0.01),
     base_frame_id_("map"),  // base_frame_id를 map으로 설정 (기본값)
     auto_resize_map_(true),
-    origin_initialized_(false)
+    origin_initialized_(false),
+    global_min_x_(std::numeric_limits<float>::max()),
+    global_max_x_(-std::numeric_limits<float>::max()),
+    global_min_y_(std::numeric_limits<float>::max()),
+    global_max_y_(-std::numeric_limits<float>::max()),
+    running_(false),
+    data_ready_(false)
 {
     // 그리드 크기 계산
     costmap_width_cells_ = static_cast<int>(costmap_width_ / costmap_resolution_);
@@ -31,8 +39,17 @@ CostmapGenerator::CostmapGenerator(rclcpp::Node* node)
     high_height_min_ = 1.5f;
     high_height_max_ = 2.0f; // 높은 장애물 (1.5~2.0m)
     
+    // 코스트맵 발행기 초기화
+    costmap_pub_ = node_->create_publisher<nav_msgs::msg::OccupancyGrid>("/liorf/costmap", 10);
+    
     RCLCPP_INFO(node_->get_logger(), "Costmap integration initialized with resolution: %.2f, size: %.1fm x %.1fm, origin: (%.2f, %.2f)", 
                costmap_resolution_, costmap_width_, costmap_height_, costmap_origin_x_, costmap_origin_y_);
+}
+
+CostmapGenerator::~CostmapGenerator()
+{
+    // 코스트맵 스레드 종료
+    stopCostmapThread();
 }
 
 void CostmapGenerator::setParameters(double resolution, double width, double height,
@@ -68,9 +85,6 @@ void CostmapGenerator::setParameters(double resolution, double width, double hei
     mid_height_max_ = 1.5f;
     high_height_min_ = 1.5f;
     high_height_max_ = max_height_threshold_ > 2.0f ? 2.0f : max_height_threshold_;
-    
-    // RCLCPP_INFO(node_->get_logger(), "Costmap parameters updated - resolution: %.2f, size: %.1fm x %.1fm", 
-    //            costmap_resolution_, costmap_width_, costmap_height_);
 }
 
 void CostmapGenerator::updateMapSize(const pcl::PointCloud<PointType>::Ptr& cloud)
@@ -446,4 +460,200 @@ nav_msgs::msg::OccupancyGrid::UniquePtr CostmapGenerator::generateCostmap(
     addRobotMarker(grid_msg);
     
     return grid_msg;
+}
+
+// 맵 최적화 노드로부터 데이터 수신
+void CostmapGenerator::processClouds(const pcl::PointCloud<PointType>::Ptr& keyPoses3D,
+                                   const std::vector<pcl::PointCloud<PointType>::Ptr>& surfCloudFrames,
+                                   const std::vector<PointTypePose>& keyPoses6D)
+{
+    std::lock_guard<std::mutex> lock(cloud_mutex_);
+    
+    // 기존 데이터 복사
+    if (!keyPoses3D->empty() && !surfCloudFrames.empty() && !keyPoses6D.empty()) {
+        cloud_data_.keyPoses3D = keyPoses3D;
+        cloud_data_.surfCloudFrames = surfCloudFrames;
+        cloud_data_.keyPoses6D = keyPoses6D;
+        data_ready_ = true;
+        
+        // 포즈 정보로 맵 경계 업데이트
+        updateGlobalMapBounds(keyPoses3D);
+    }
+}
+
+// 글로벌 맵 경계 업데이트
+void CostmapGenerator::updateGlobalMapBounds(const pcl::PointCloud<PointType>::Ptr& cloud)
+{
+    if (!auto_resize_map_) return;
+    
+    // 현재 포인트 클라우드의 범위 계산
+    float min_x = std::numeric_limits<float>::max();
+    float max_x = -std::numeric_limits<float>::max();
+    float min_y = std::numeric_limits<float>::max();
+    float max_y = -std::numeric_limits<float>::max();
+    
+    for (const auto& point : cloud->points)
+    {
+        min_x = std::min(min_x, point.x);
+        max_x = std::max(max_x, point.x);
+        min_y = std::min(min_y, point.y);
+        max_y = std::max(max_y, point.y);
+    }
+    
+    // 글로벌 맵 경계 업데이트
+    bool updated = false;
+    if (min_x < global_min_x_) {
+        global_min_x_ = min_x;
+        updated = true;
+    }
+    if (max_x > global_max_x_) {
+        global_max_x_ = max_x;
+        updated = true;
+    }
+    if (min_y < global_min_y_) {
+        global_min_y_ = min_y;
+        updated = true;
+    }
+    if (max_y > global_max_y_) {
+        global_max_y_ = max_y;
+        updated = true;
+    }
+    
+    // 경계가 업데이트되지 않았으면 추가 검증 로직은 생략
+    if (!updated) return;
+    
+    // 맵 확장 - 유효성 검사
+    if (global_min_x_ > global_max_x_ || global_min_y_ > global_max_y_) {
+        global_min_x_ = -5.0;
+        global_max_x_ = 5.0;
+        global_min_y_ = -5.0;
+        global_max_y_ = 5.0;
+    }
+}
+
+// 포인트 클라우드 변환 함수
+pcl::PointCloud<PointType>::Ptr CostmapGenerator::transformPointCloud(
+    pcl::PointCloud<PointType>::Ptr cloudIn, const PointTypePose* transformIn)
+{
+    pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
+
+    // Eigen 변환 행렬 생성
+    Eigen::Affine3f transCur = Eigen::Affine3f::Identity();
+    transCur.translation() << transformIn->x, transformIn->y, transformIn->z;
+    
+    Eigen::AngleAxisf rotX(transformIn->roll, Eigen::Vector3f::UnitX());
+    Eigen::AngleAxisf rotY(transformIn->pitch, Eigen::Vector3f::UnitY());
+    Eigen::AngleAxisf rotZ(transformIn->yaw, Eigen::Vector3f::UnitZ());
+    transCur.rotate(rotZ * rotY * rotX);
+    
+    // PCL 변환 함수 사용
+    pcl::transformPointCloud(*cloudIn, *cloudOut, transCur);
+    return cloudOut;
+}
+
+// 코스트맵 스레드 시작
+void CostmapGenerator::startCostmapThread()
+{
+    if (running_) return;
+    
+    running_ = true;
+    thread_ = std::thread(&CostmapGenerator::costmapThreadFunc, this);
+    RCLCPP_INFO(node_->get_logger(), "Costmap thread started");
+}
+
+// 코스트맵 스레드 종료
+void CostmapGenerator::stopCostmapThread()
+{
+    if (!running_) return;
+    
+    running_ = false;
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+    RCLCPP_INFO(node_->get_logger(), "Costmap thread stopped");
+}
+
+// 코스트맵 스레드 함수 - 별도 스레드에서 실행
+void CostmapGenerator::costmapThreadFunc()
+{
+    // 코스트맵 업데이트 주기를 0.3Hz에서 1Hz로 증가 (약 1초마다 갱신)
+    rclcpp::Rate rate(1.0);
+    
+    // 다운샘플링 필터 설정
+    pcl::VoxelGrid<PointType> downSizeFilterMap;
+    downSizeFilterMap.setLeafSize(0.2, 0.2, 0.2); // 20cm 해상도로 필터링 (성능 향상)
+    
+    while (running_ && rclcpp::ok())
+    {
+        rate.sleep();
+        
+        pcl::PointCloud<PointType>::Ptr merged_cloud(new pcl::PointCloud<PointType>());
+        std::vector<PointTypePose> keyPoses6D;
+        std::vector<pcl::PointCloud<PointType>::Ptr> surfCloudKeyFrames;
+        pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D;
+        
+        // 동기화된 블록 내에서 데이터 복사
+        {
+            std::lock_guard<std::mutex> lock(cloud_mutex_);
+            
+            if (!data_ready_ || cloud_data_.keyPoses3D->points.empty() || cloud_data_.surfCloudFrames.empty())
+                continue;
+            
+            // 데이터 복사
+            cloudKeyPoses3D = cloud_data_.keyPoses3D;
+            surfCloudKeyFrames = cloud_data_.surfCloudFrames;
+            keyPoses6D = cloud_data_.keyPoses6D;
+            
+            // 맵 경계/영역 계산을 위해 모든 키포즈 포인트 직접 전달
+            updateMapSize(cloudKeyPoses3D);
+        }
+        
+        // 키프레임 데이터 처리
+        size_t frameCount = surfCloudKeyFrames.size();
+        
+        // 첫 프레임과 현재 프레임은 항상 포함
+        if (frameCount > 0) {
+            PointTypePose firstPose = keyPoses6D[0];
+            pcl::PointCloud<PointType>::Ptr first_cloud = transformPointCloud(surfCloudKeyFrames[0], &firstPose);
+            *merged_cloud += *first_cloud;
+        }
+        
+        // 마지막 프레임
+        if (frameCount > 1) {
+            PointTypePose lastPose = keyPoses6D[frameCount - 1];
+            pcl::PointCloud<PointType>::Ptr last_cloud = transformPointCloud(surfCloudKeyFrames[frameCount - 1], &lastPose);
+            *merged_cloud += *last_cloud;
+        }
+        
+        // 균등 분포로 추가 프레임 선택
+        int max_samples = std::min(100, static_cast<int>(frameCount)); // 최대 100개 프레임 포함
+        int step = std::max(1, static_cast<int>(frameCount / max_samples));
+        
+        for (int i = 1; i < static_cast<int>(frameCount) - 1; i += step) {
+            PointTypePose pose = keyPoses6D[i];
+            pcl::PointCloud<PointType>::Ptr transformed_cloud = transformPointCloud(surfCloudKeyFrames[i], &pose);
+            *merged_cloud += *transformed_cloud;
+        }
+        
+        RCLCPP_INFO(node_->get_logger(), "Costmap update: using %d/%ld frames, step=%d", 
+                std::min(max_samples, static_cast<int>(frameCount)), frameCount, step);
+        
+        // 포인트가 부족하면 반환
+        if (merged_cloud->points.empty())
+            continue;
+        
+        // 다운샘플링으로 포인트 수 감소
+        pcl::PointCloud<PointType>::Ptr filtered_cloud(new pcl::PointCloud<PointType>());
+        downSizeFilterMap.setInputCloud(merged_cloud);
+        downSizeFilterMap.filter(*filtered_cloud);
+        
+        RCLCPP_INFO(node_->get_logger(), "Costmap cloud size: %ld points (after filtering: %ld points)",
+               merged_cloud->points.size(), filtered_cloud->points.size());
+        
+        // 코스트맵 생성기를 통해 OccupancyGrid 생성 
+        auto costmap = generateCostmap(filtered_cloud);
+        
+        // 생성된 코스트맵 발행
+        costmap_pub_->publish(std::move(costmap));
+    }
 } 

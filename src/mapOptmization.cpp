@@ -180,6 +180,15 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
 
         publishFrames();
     }
+    
+    // 코스트맵 생성기에 데이터 전달
+    if (costmap_generator_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
+        // PCL의 points 멤버를 std::vector<PointTypePose>로 변환
+        std::vector<PointTypePose> keyPoses6DVector(cloudKeyPoses6D->points.begin(), cloudKeyPoses6D->points.end());
+        
+        // 코스트맵 데이터 업데이트
+        costmap_generator_->processClouds(cloudKeyPoses3D, surfCloudKeyFrames, keyPoses6DVector);
+    }
 }
 
 void mapOptimization::gpsHandler(const sensor_msgs::msg::NavSatFix::SharedPtr gpsMsg)
@@ -226,7 +235,14 @@ pcl::PointCloud<PointType>::Ptr mapOptimization::transformPointCloud(pcl::PointC
     int cloudSize = cloudIn->size();
     cloudOut->resize(cloudSize);
 
-    Eigen::Affine3f transCur = pcl::getTransformation(transformIn->x, transformIn->y, transformIn->z, transformIn->roll, transformIn->pitch, transformIn->yaw);
+    // pcl::getTransformation 대신 Eigen 사용
+    Eigen::Affine3f transCur = Eigen::Affine3f::Identity();
+    transCur.translation() << transformIn->x, transformIn->y, transformIn->z;
+    
+    Eigen::AngleAxisf rotX(transformIn->roll, Eigen::Vector3f::UnitX());
+    Eigen::AngleAxisf rotY(transformIn->pitch, Eigen::Vector3f::UnitY());
+    Eigen::AngleAxisf rotZ(transformIn->yaw, Eigen::Vector3f::UnitZ());
+    transCur.rotate(rotZ * rotY * rotX);
     
     #pragma omp parallel for num_threads(numberOfCores)
     for (int i = 0; i < cloudSize; ++i)
@@ -247,9 +263,14 @@ pcl::PointCloud<PointType>::Ptr mapOptimization::transformPointCloudWithLidarOff
     int cloudSize = cloudIn->size();
     cloudOut->resize(cloudSize);
 
-    // 기존 변환 행렬
-    Eigen::Affine3f transCur = pcl::getTransformation(transformIn->x, transformIn->y, transformIn->z, 
-                                                     transformIn->roll, transformIn->pitch, transformIn->yaw);
+    // 기존 변환 행렬을 Eigen 함수를 사용하여 생성
+    Eigen::Affine3f transCur = Eigen::Affine3f::Identity();
+    transCur.translation() << transformIn->x, transformIn->y, transformIn->z;
+    
+    Eigen::AngleAxisf rotX(transformIn->roll, Eigen::Vector3f::UnitX());
+    Eigen::AngleAxisf rotY(transformIn->pitch, Eigen::Vector3f::UnitY());
+    Eigen::AngleAxisf rotZ(transformIn->yaw, Eigen::Vector3f::UnitZ());
+    transCur.rotate(rotZ * rotY * rotX);
     
     // 기본 LiDAR 오프셋 값 (TF를 찾지 못할 경우 사용)
     float lidarOffsetX = 0.23;
@@ -300,17 +321,11 @@ pcl::PointCloud<PointType>::Ptr mapOptimization::transformPointCloudWithLidarOff
         //     roll, pitch, yaw
         // );
     }
-    catch (tf2::TransformException &ex) {
-        // TF를 찾지 못하면 기본값 사용
-        RCLCPP_WARN_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            5000, // 5초마다 출력
-            "TF 변환을 찾을 수 없습니다. 기본값 사용 (%f, %f, %f): %s",
-            lidarOffsetX, lidarOffsetY, lidarOffsetZ, ex.what()
-        );
+    catch (const tf2::TransformException &ex) {
+        RCLCPP_WARN(this->get_logger(), "Could not transform from %s to %s: %s", baselinkFrame.c_str(), lidarFrame.c_str(), ex.what());
         
-        lidarOffset = pcl::getTransformation(lidarOffsetX, lidarOffsetY, lidarOffsetZ, 0, 0, 0);
+        // 기본값으로 변환 행렬 생성
+        lidarOffset.translation() << lidarOffsetX, lidarOffsetY, lidarOffsetZ;
     }
     
     // 최종 변환 = 기존변환 * LiDAR오프셋
@@ -1859,155 +1874,9 @@ void mapOptimization::publishFrames()
 // 맵 크기 자동 조정 함수
 void mapOptimization::updateMapSize(const pcl::PointCloud<PointType>::Ptr& cloud)
 {
-    if (!costmap_generator_->getAutoResizeMap()) return;
-    
-    static float global_min_x = std::numeric_limits<float>::max();
-    static float global_max_x = -std::numeric_limits<float>::max();
-    static float global_min_y = std::numeric_limits<float>::max();
-    static float global_max_y = -std::numeric_limits<float>::max();
-    
-    // 현재 포인트 클라우드의 범위 계산
-    float min_x = std::numeric_limits<float>::max();
-    float max_x = -std::numeric_limits<float>::max();
-    float min_y = std::numeric_limits<float>::max();
-    float max_y = -std::numeric_limits<float>::max();
-    
-    for (const auto& point : cloud->points)
-    {
-        min_x = std::min(min_x, point.x);
-        max_x = std::max(max_x, point.x);
-        min_y = std::min(min_y, point.y);
-        max_y = std::max(max_y, point.y);
-    }
-    
-    // 글로벌 맵 경계 업데이트
-    bool updated = false;
-    if (min_x < global_min_x) {
-        global_min_x = min_x;
-        updated = true;
-    }
-    if (max_x > global_max_x) {
-        global_max_x = max_x;
-        updated = true;
-    }
-    if (min_y < global_min_y) {
-        global_min_y = min_y;
-        updated = true;
-    }
-    if (max_y > global_max_y) {
-        global_max_y = max_y;
-        updated = true;
-    }
-    
-    // 포즈 범위로 추가 업데이트
-    if (cloudKeyPoses3D) {
-        float poses_min_x = std::numeric_limits<float>::max();
-        float poses_max_x = -std::numeric_limits<float>::max();
-        float poses_min_y = std::numeric_limits<float>::max();
-        float poses_max_y = -std::numeric_limits<float>::max();
-        
-        for (const auto& point : cloudKeyPoses3D->points) {
-            poses_min_x = std::min(poses_min_x, point.x);
-            poses_max_x = std::max(poses_max_x, point.x);
-            poses_min_y = std::min(poses_min_y, point.y);
-            poses_max_y = std::max(poses_max_y, point.y);
-        }
-        
-        if (poses_min_x < global_min_x) { global_min_x = poses_min_x; updated = true; }
-        if (poses_max_x > global_max_x) { global_max_x = poses_max_x; updated = true; }
-        if (poses_min_y < global_min_y) { global_min_y = poses_min_y; updated = true; }
-        if (poses_max_y > global_max_y) { global_max_y = poses_max_y; updated = true; }
-    }
-    
-    // 경계가 업데이트되지 않았으면 추가 검증 로직은 생략
-    if (!updated) return;
-    
-    // 맵 확장 - 유효성 검사
-    if (global_min_x > global_max_x || global_min_y > global_max_y) {
-        global_min_x = -5.0;
-        global_max_x = 5.0;
-        global_min_y = -5.0;
-        global_max_y = 5.0;
-    }
-    
-    // 포인트 클라우드와 경계 정보를 코스트맵 생성기로 전달
-    // 원점 초기화 및 맵 크기 조정은 CostmapGenerator에서 처리됨
-    costmap_generator_->updateMapSize(cloud);
-}
-
-// 코스트맵 생성 및 발행 함수 (별도 스레드에서 실행)
-void mapOptimization::costmapThread()
-{
-    // 코스트맵 업데이트 주기를 0.3Hz에서 1Hz로 증가 (약 1초마다 갱신)
-    rclcpp::Rate rate(1.0);
-    
-    // 다운샘플링 필터 설정
-    pcl::VoxelGrid<PointType> downSizeFilterMap;
-    downSizeFilterMap.setLeafSize(0.2, 0.2, 0.2); // 20cm 해상도로 필터링 (성능 향상)
-    
-    while (rclcpp::ok())
-    {
-        rate.sleep();
-        
-        pcl::PointCloud<PointType>::Ptr merged_cloud(new pcl::PointCloud<PointType>());
-        
-        {
-            std::lock_guard<std::mutex> lock(mtx); // 뮤텍스 잠금으로 데이터 보호
-            
-            if (cloudKeyPoses3D->points.empty() || surfCloudKeyFrames.empty())
-                continue;
-            
-            // 맵 경계/영역 계산을 위해 모든 키포즈 포인트 직접 전달
-            updateMapSize(cloudKeyPoses3D);
-            
-            // 키프레임 데이터 처리
-            size_t frameCount = surfCloudKeyFrames.size();
-            
-            // 첫 프레임과 현재 프레임은 항상 포함
-            if (frameCount > 0) {
-                PointTypePose firstPose = cloudKeyPoses6D->points[0];
-                pcl::PointCloud<PointType>::Ptr first_cloud = transformPointCloud(surfCloudKeyFrames[0], &firstPose);
-                *merged_cloud += *first_cloud;
-            }
-            
-            // 마지막 프레임
-            if (frameCount > 1) {
-                PointTypePose lastPose = cloudKeyPoses6D->points[frameCount - 1];
-                pcl::PointCloud<PointType>::Ptr last_cloud = transformPointCloud(surfCloudKeyFrames[frameCount - 1], &lastPose);
-                *merged_cloud += *last_cloud;
-            }
-            
-            // 균등 분포로 추가 프레임 선택
-            int max_samples = std::min(100, static_cast<int>(frameCount)); // 최대 100개 프레임 포함
-            int step = std::max(1, static_cast<int>(frameCount / max_samples));
-            
-            for (int i = 1; i < static_cast<int>(frameCount) - 1; i += step) {
-                PointTypePose pose = cloudKeyPoses6D->points[i];
-                pcl::PointCloud<PointType>::Ptr transformed_cloud = transformPointCloud(surfCloudKeyFrames[i], &pose);
-                *merged_cloud += *transformed_cloud;
-            }
-            
-            RCLCPP_INFO(this->get_logger(), "Costmap update: using %d/%ld frames, step=%d", 
-                    std::min(max_samples, static_cast<int>(frameCount)), frameCount, step);
-        }
-        
-        // 포인트가 부족하면 반환
-        if (merged_cloud->points.empty())
-            continue;
-        
-        // 다운샘플링으로 포인트 수 감소
-        pcl::PointCloud<PointType>::Ptr filtered_cloud(new pcl::PointCloud<PointType>());
-        downSizeFilterMap.setInputCloud(merged_cloud);
-        downSizeFilterMap.filter(*filtered_cloud);
-        
-        RCLCPP_INFO(this->get_logger(), "Costmap cloud size: %ld points (after filtering: %ld points)",
-               merged_cloud->points.size(), filtered_cloud->points.size());
-        
-        // 코스트맵 생성기를 통해 OccupancyGrid 생성 
-        auto costmap = costmap_generator_->generateCostmap(filtered_cloud);
-        
-        // 생성된 코스트맵 발행
-        costmap_pub_->publish(std::move(costmap));
+    // CostmapGenerator 내부에서 맵 크기와 경계 관리
+    if (costmap_generator_) {
+        costmap_generator_->updateMapSize(cloud);
     }
 }
 
@@ -2044,7 +1913,9 @@ int main(int argc, char** argv)
 
     std::thread loopthread(&mapOptimization::loopClosureThread, MO);
     std::thread visualizeMapThread(&mapOptimization::visualizeGlobalMapThread, MO);
-    std::thread costmapThread(&mapOptimization::costmapThread, MO);
+    
+    // 코스트맵 스레드는 CostmapGenerator 내부에서 시작
+    MO->costmap_generator_->startCostmapThread();
 
     exec.spin();
 
@@ -2052,7 +1923,7 @@ int main(int argc, char** argv)
 
     loopthread.join();
     visualizeMapThread.join();
-    costmapThread.join();
+    // costmapThread는 ~CostmapGenerator()에서 자동으로 정리됨
 
     return 0;
 }
