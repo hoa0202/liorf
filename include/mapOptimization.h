@@ -1,7 +1,8 @@
 #pragma once
 
 #include "utility.h"
-#include "costmap.h" // 코스트맵 생성기 클래스 헤더 추가 - 상단으로 이동
+#include "costmap.h" // 코스트맵 생성기 클래스 헤더 추가
+#include "loopclosure.h" // Loop Closure 클래스 헤더 추가
 #include "liorf/msg/cloud_info.hpp"
 #include "liorf/srv/save_map.hpp"
 // <!-- liorf_yjz_lucky_boy -->
@@ -150,6 +151,9 @@ public:
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_pub_;
     std::unique_ptr<CostmapGenerator> costmap_generator_; // 코스트맵 생성기
 
+    // Loop Closure 관련 변수
+    std::unique_ptr<LoopClosure> loop_closure_; // 루프 클로저 모듈
+
     mapOptimization(const rclcpp::NodeOptions & options);
 
     void allocateMemory();
@@ -166,14 +170,7 @@ public:
     bool saveMapService(const std::shared_ptr<liorf::srv::SaveMap::Request> req, std::shared_ptr<liorf::srv::SaveMap::Response> res);
     void visualizeGlobalMapThread();
     void publishGlobalMap();
-    void loopClosureThread();
-    void loopInfoHandler(const std_msgs::msg::Float64MultiArray::SharedPtr loopMsg);
-    void performRSLoopClosure();
-    void performSCLoopClosure();
-    bool detectLoopClosureDistance(int *latestID, int *closestID);
-    bool detectLoopClosureExternal(int *latestID, int *closestID);
-    void loopFindNearKeyframes(pcl::PointCloud<PointType>::Ptr& nearKeyframes, const int& key, const int& searchNum, const int& loop_index);
-    void visualizeLoopClosure();
+    void addLoopFactor();
     void updateInitialGuess();
     void extractForLoopClosure();
     void extractNearby();
@@ -190,7 +187,6 @@ public:
     bool saveFrame();
     void addOdomFactor();
     void addGPSFactor();
-    void addLoopFactor();
     void saveKeyFramesAndFactor();
     void correctPoses();
     void updatePath(const PointTypePose& pose_in);

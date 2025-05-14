@@ -1,4 +1,9 @@
 #include <common_lib.h>
+#include <utility.h> // SensorType 정의를 위해 추가
+
+// common_lib_ 전역 변수 정의
+std::shared_ptr<CommonLib::common_lib> common_lib_ = std::make_shared<CommonLib::common_lib>("LIORF-ROS2");
+
 namespace CommonLib
 {
   template float common_lib::pointDistance<pcl::PointXYZI>(const pcl::PointXYZI& p);

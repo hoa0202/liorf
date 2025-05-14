@@ -3,7 +3,27 @@ project(liorf)
 
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g -pthread")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -pthread")
+
+# 헤더 프리컴파일 활성화
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag(-std=c++17 COMPILER_SUPPORTS_CXX17)
+option(USE_PCH "Use precompiled headers" ON)
+
+# 빌드 시간 개선 설정
+if(USE_PCH)
+  message(STATUS "Using precompiled headers")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Winvalid-pch")
+  # ccache 사용 설정
+  find_program(CCACHE_FOUND ccache)
+  if(CCACHE_FOUND)
+    message(STATUS "Using ccache to speed up compilation")
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
+  endif()
+endif()
+
+# 링커 최적화 옵션 추가
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--as-needed")
 
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
@@ -79,8 +99,22 @@ ament_target_dependencies(${PROJECT_NAME}_imageProjection ${ros2_lib})
 target_link_libraries(${PROJECT_NAME}_imageProjection "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
 
 # # Mapping Optimization
-add_executable(${PROJECT_NAME}_mapOptmization src/mapOptmization.cpp src/costmap.cpp ${common_lib} include/Scancontext.cpp)
+add_executable(${PROJECT_NAME}_mapOptmization 
+  src/mapOptmization.cpp 
+  src/costmap.cpp 
+  src/loopclosure.cpp
+  ${common_lib} 
+  include/Scancontext.cpp
+)
 target_compile_options(${PROJECT_NAME}_mapOptmization PRIVATE ${OpenMP_CXX_FLAGS})
+if(USE_PCH)
+  target_precompile_headers(${PROJECT_NAME}_mapOptmization PRIVATE 
+    <pcl/point_cloud.h>
+    <pcl/point_types.h>
+    <gtsam/geometry/Pose3.h>
+    <Eigen/Dense>
+  )
+endif()
 ament_target_dependencies(${PROJECT_NAME}_mapOptmization ${ros2_lib})
 target_link_libraries(${PROJECT_NAME}_mapOptmization Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam)
 
