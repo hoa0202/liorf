@@ -130,6 +130,42 @@ add_executable(${PROJECT_NAME}_imuPreintegration src/imuPreintegration.cpp ${com
 ament_target_dependencies(${PROJECT_NAME}_imuPreintegration ${ros2_lib})
 target_link_libraries(${PROJECT_NAME}_imuPreintegration Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} gtsam)
 
+add_executable(grid_map_generator src/grid_map_generator.cpp)
+ament_target_dependencies(grid_map_generator
+  rclcpp
+  sensor_msgs
+  nav_msgs
+  pcl_conversions
+  visualization_msgs
+  tf2_ros
+  tf2_geometry_msgs
+)
+target_link_libraries(grid_map_generator
+  ${PCL_LIBRARIES}
+)
+
+install(TARGETS grid_map_generator
+  RUNTIME DESTINATION lib/${PROJECT_NAME})
+
+
+# Removert Node: 동적 물체 제거용 노드
+add_executable(removert_node src/removert_node.cpp)
+ament_target_dependencies(removert_node
+  rclcpp
+  sensor_msgs
+  pcl_conversions
+  tf2_ros
+  tf2_sensor_msgs
+  tf2_geometry_msgs
+)
+target_link_libraries(removert_node
+  ${PCL_LIBRARIES}
+)
+install(TARGETS removert_node
+  RUNTIME DESTINATION lib/${PROJECT_NAME})
+
+
+
 install(
   DIRECTORY launch config rviz
   DESTINATION share/${PROJECT_NAME}/
