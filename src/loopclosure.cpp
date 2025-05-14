@@ -1,17 +1,23 @@
-#include "loopclosure.h"
-#include "utility.h"
+#include "liorf/include/loopclosure.h"
+#include "liorf/include/utility.h"
 
-LoopClosure::LoopClosure(rclcpp::Node* node) 
+LoopClosure::LoopClosure(rclcpp::Node* node, 
+                        double historyKeyframeSearchRadius,
+                        int historyKeyframeSearchNum,
+                        double historyKeyframeSearchTimeDiff,
+                        double historyKeyframeFitnessScore) 
     : node_(node),
     aLoopIsClosed(false),
     isRunning(false),
-    isThreadRunning(true)
+    isThreadRunning(true),
+    historyKeyframeSearchRadius(historyKeyframeSearchRadius),
+    historyKeyframeSearchNum(historyKeyframeSearchNum),
+    historyKeyframeSearchTimeDiff(historyKeyframeSearchTimeDiff),
+    historyKeyframeFitnessScore(historyKeyframeFitnessScore)
 {
-    // 파라미터 초기화
-    historyKeyframeSearchRadius = node_->declare_parameter<double>("historyKeyframeSearchRadius", 10.0);
-    historyKeyframeSearchNum = node_->declare_parameter<int>("historyKeyframeSearchNum", 25);
-    historyKeyframeSearchTimeDiff = node_->declare_parameter<double>("historyKeyframeSearchTimeDiff", 30.0);
-    historyKeyframeFitnessScore = node_->declare_parameter<double>("historyKeyframeFitnessScore", 0.3);
+    // 파라미터 로깅
+    RCLCPP_INFO(node_->get_logger(), "Loop closure parameters: historyKeyframeSearchRadius=%f, historyKeyframeSearchNum=%d, historyKeyframeSearchTimeDiff=%f, historyKeyframeFitnessScore=%f", 
+        historyKeyframeSearchRadius, historyKeyframeSearchNum, historyKeyframeSearchTimeDiff, historyKeyframeFitnessScore);
 
     // 포인트 클라우드 초기화
     cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
@@ -22,7 +28,12 @@ LoopClosure::LoopClosure(rclcpp::Node* node)
     downSizeFilterICP.setLeafSize(0.3, 0.3, 0.3);
 
     // SC 관리자 초기화
-    sc_manager_ = std::make_unique<SCManager>();
+    try {
+        sc_manager_ = std::make_unique<SCManager>();
+        RCLCPP_INFO(node_->get_logger(), "SC Manager initialized successfully");
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "Failed to initialize SC Manager: %s", e.what());
+    }
 
     // 구독/발행자 설정
     subLoop = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
@@ -70,7 +81,8 @@ void LoopClosure::loopClosureThread()
 void LoopClosure::setInputData(pcl::PointCloud<PointType>::Ptr& keyPoses3D, 
                               pcl::PointCloud<PointTypePose>::Ptr& keyPoses6D,
                               std::vector<pcl::PointCloud<PointType>::Ptr>& surfKeyFrames,
-                              double currentTimestamp)
+                              double currentTimestamp,
+                              pcl::PointCloud<PointType>::Ptr currentScan)
 {
     std::lock_guard<std::mutex> lock(mtx);
 
@@ -79,6 +91,19 @@ void LoopClosure::setInputData(pcl::PointCloud<PointType>::Ptr& keyPoses3D,
     *cloudKeyPoses6D = *keyPoses6D;
     surfCloudKeyFrames = surfKeyFrames;
     timeLaserInfoCur = currentTimestamp;
+    
+    // Scan Context 생성
+    if (sc_manager_ && currentScan) {
+        try {
+            // Scan Context 생성 - SINGLE_SCAN_FULL 방식 사용
+            sc_manager_->makeAndSaveScancontextAndKeys(*currentScan);
+            
+            // 디버그 메시지
+            RCLCPP_DEBUG(node_->get_logger(), "SC Manager processed current scan successfully");
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(node_->get_logger(), "Error in SC Manager while processing scan: %s", e.what());
+        }
+    }
 }
 
 void LoopClosure::loopInfoHandler(const std_msgs::msg::Float64MultiArray::SharedPtr loopMsg)

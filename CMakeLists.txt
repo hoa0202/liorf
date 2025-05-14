@@ -70,12 +70,19 @@ endif()
 
 # include directories
 include_directories(
+  ${CMAKE_CURRENT_SOURCE_DIR}
   lib
   include
   ${PCL_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
   ${GTSAM_INCLUDE_DIR}
   ${pcl_ros_INCLUDE_DIRS}  # 추가된 부분
+)
+
+# 심볼릭 링크 생성 - 헤더 탐색을 위한 추가 설정
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_SOURCE_DIR}/liorf
+  COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/liorf/include
 )
 
 # link directories

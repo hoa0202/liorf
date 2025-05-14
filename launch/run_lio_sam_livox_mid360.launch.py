@@ -54,15 +54,15 @@ def generate_launch_description():
             parameters=[parameter_file],
             output='screen'
         ),
-        # Node(
-        #     package='tf2_ros',
-        #     executable='static_transform_publisher',
-        #     name='static_tf_base_to_livox',
-        #     arguments=['--x', '0.23', '--y', '0', '--z', '0.805',
-        #                '--qx', '0', '--qy', '0', '--qz', '0', '--qw', '1',
-        #                '--frame-id', 'base_link', '--child-frame-id', 'livox_frame'],
-        #     output='screen'
-        # ),        
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='static_tf_base_to_livox',
+            arguments=['--x', '0.23', '--y', '0', '--z', '0.805',
+                       '--qx', '0', '--qy', '0', '--qz', '0', '--qw', '1',
+                       '--frame-id', 'base_link', '--child-frame-id', 'livox_frame'],
+            output='screen'
+        ),        
         Node(
             package='liorf',
             executable='liorf_imuPreintegration',

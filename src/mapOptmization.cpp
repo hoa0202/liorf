@@ -1,4 +1,4 @@
-#include "utility.h"
+#include "liorf/include/utility.h"
 #include "liorf/msg/cloud_info.hpp"
 #include "liorf/srv/save_map.hpp"
 // <!-- liorf_yjz_lucky_boy -->
@@ -21,13 +21,13 @@
 #include <GeographicLib/Geocentric.hpp>
 #include <GeographicLib/LocalCartesian.hpp>
 
-#include "Scancontext.h"
+#include "liorf/include/Scancontext.h"
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <numeric> // for std::accumulate
-#include "costmap.h" // 코스트맵 생성기 클래스 헤더 추가
-#include "loopclosure.h" // Loop Closure 클래스 헤더 추가
+#include "liorf/include/costmap.h" // 코스트맵 생성기 클래스 헤더 추가
+#include "liorf/include/loopclosure.h" // Loop Closure 클래스 헤더 추가
 
-#include "mapOptimization.h"
+#include "liorf/include/mapOptimization.h"
 
 // 헤더가 이미 필요한 모든 선언을 포함하므로 중복 선언 제거
 // using namespace gtsam;
@@ -100,8 +100,28 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
             base_frame_id, auto_resize_map
         );
 
-    // Loop Closure 모듈 초기화
-    loop_closure_ = std::make_unique<LoopClosure>(this);
+    // Loop Closure 모듈 초기화 - 명시적으로 파라미터 전달
+    double historyKeyframeSearchRadius = 10.0;
+    int historyKeyframeSearchNum = 25;
+    double historyKeyframeSearchTimeDiff = 30.0;
+    double historyKeyframeFitnessScore = 0.3;
+    
+    // ParamServer에서 이미 선언된 파라미터를 가져옵니다
+    this->get_parameter_or("historyKeyframeSearchRadius", historyKeyframeSearchRadius, historyKeyframeSearchRadius);
+    this->get_parameter_or("historyKeyframeSearchNum", historyKeyframeSearchNum, historyKeyframeSearchNum);
+    this->get_parameter_or("historyKeyframeSearchTimeDiff", historyKeyframeSearchTimeDiff, historyKeyframeSearchTimeDiff);
+    this->get_parameter_or("historyKeyframeFitnessScore", historyKeyframeFitnessScore, historyKeyframeFitnessScore);
+    
+    RCLCPP_INFO(this->get_logger(), "Initializing Loop Closure with parameters: radius=%f, num=%d, timeDiff=%f, fitnessScore=%f",
+        historyKeyframeSearchRadius, historyKeyframeSearchNum, historyKeyframeSearchTimeDiff, historyKeyframeFitnessScore);
+    
+    loop_closure_ = std::make_unique<LoopClosure>(
+        this, 
+        historyKeyframeSearchRadius,
+        historyKeyframeSearchNum,
+        historyKeyframeSearchTimeDiff,
+        historyKeyframeFitnessScore
+    );
 }
 
 void mapOptimization::allocateMemory()
@@ -714,22 +734,22 @@ void mapOptimization::addLoopFactor()
     const auto& loopNoiseQueue = loop_closure_->getLoopNoiseQueue();
     
     // 루프 큐가 비어있으면 반환
-        if (loopIndexQueue.empty())
-            return;
+    if (loopIndexQueue.empty())
+        return;
 
     // 그래프에 루프 제약 추가
-        for (int i = 0; i < (int)loopIndexQueue.size(); ++i)
-        {
-            int indexFrom = loopIndexQueue[i].first;
-            int indexTo = loopIndexQueue[i].second;
-            gtsam::Pose3 poseBetween = loopPoseQueue[i];
-            auto noiseBetween = loopNoiseQueue[i];
-            gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
-        }
+    for (int i = 0; i < (int)loopIndexQueue.size(); ++i)
+    {
+        int indexFrom = loopIndexQueue[i].first;
+        int indexTo = loopIndexQueue[i].second;
+        gtsam::Pose3 poseBetween = loopPoseQueue[i];
+        auto noiseBetween = loopNoiseQueue[i];
+        gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
+    }
 
     // Loop Closure 완료 후 플래그 설정
-        aLoopIsClosed = true;
-    }
+    aLoopIsClosed = true;
+}
 
 void mapOptimization::saveKeyFramesAndFactor()
     {
@@ -815,36 +835,19 @@ void mapOptimization::saveKeyFramesAndFactor()
         // - SINGLE_SCAN_FULL: using downsampled original point cloud (/full_cloud_projected + downsampling)
         // - SINGLE_SCAN_FEAT: using surface feature as an input point cloud for scan context (2020.04.01: checked it works.)
         // - MULTI_SCAN_FEAT: using NearKeyframes (because a MulRan scan does not have beyond region, so to solve this issue ... )
-        const SCInputType sc_input_type = SCInputType::SINGLE_SCAN_FULL; // change this 
-
-        if( sc_input_type == SCInputType::SINGLE_SCAN_FULL )
-        {
+        
+        // Loop Closure 모듈에 데이터 전달 - SC Manager 관련 작업도 Loop Closure 내부에서 처리
+        if (loop_closure_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
+            // 현재 스캔 데이터도 함께 전달
             pcl::PointCloud<PointType>::Ptr thisRawCloudKeyFrame(new pcl::PointCloud<PointType>());
             pcl::fromROSMsg(cloudInfo.cloud_deskewed, *thisRawCloudKeyFrame);
-
-            scManager.makeAndSaveScancontextAndKeys(*thisRawCloudKeyFrame);
-        }  
-        else if (sc_input_type == SCInputType::SINGLE_SCAN_FEAT)
-        { 
-            scManager.makeAndSaveScancontextAndKeys(*thisSurfKeyFrame); 
-        }
-        else if (sc_input_type == SCInputType::MULTI_SCAN_FEAT)
-        { 
-            pcl::PointCloud<PointType>::Ptr multiKeyFrameFeatureCloud(new pcl::PointCloud<PointType>());
-        // extractNearby 함수에서 가장 가까운 키프레임들을 찾는 것과 유사한 방식으로 구현
-        if (loop_closure_) {
-            loop_closure_->loopFindNearKeyFrames(multiKeyFrameFeatureCloud, cloudKeyPoses6D->size() - 1, historyKeyframeSearchNum, -1);
-        }
-            scManager.makeAndSaveScancontextAndKeys(*multiKeyFrameFeatureCloud); 
+            
+            // 루프 클로저에 데이터 전달 - Scan Context 생성 작업은 Loop Closure 내부에서 수행
+            loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur, thisRawCloudKeyFrame);
         }
 
         // save path for visualization
         updatePath(thisPose6D);
-
-    // Loop Closure 모듈에 데이터 전달
-    if (loop_closure_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
-        loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur);
-    }
     }
 
 void mapOptimization::correctPoses()
@@ -1507,23 +1510,36 @@ int main(int argc, char** argv)
 
     // Loop Closure 스레드 시작
     std::thread loopThread;
-    if (MO->loop_closure_ && MO->loopClosureEnableFlag) {
-        loopThread = std::thread(&LoopClosure::loopClosureThread, MO->loop_closure_.get());
+    if (MO->loop_closure_) {
+        try {
+            RCLCPP_INFO(MO->get_logger(), "Starting Loop Closure thread...");
+            loopThread = std::thread(&LoopClosure::loopClosureThread, MO->loop_closure_.get());
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(MO->get_logger(), "Failed to start Loop Closure thread: %s", e.what());
+        }
+    } else {
+        RCLCPP_WARN(MO->get_logger(), "Loop Closure module not initialized");
     }
 
     std::thread visualizeMapThread(&mapOptimization::visualizeGlobalMapThread, MO);
     
     // 코스트맵 스레드는 CostmapGenerator 내부에서 시작
-    MO->costmap_generator_->startCostmapThread();
+    if (MO->costmap_generator_) {
+        MO->costmap_generator_->startCostmapThread();
+    }
 
     exec.spin();
 
     rclcpp::shutdown();
 
+    // 안전하게 스레드 종료
     if (loopThread.joinable()) {
         loopThread.join();
     }
-    visualizeMapThread.join();
+    
+    if (visualizeMapThread.joinable()) {
+        visualizeMapThread.join();
+    }
     // costmapThread는 ~CostmapGenerator()에서 자동으로 정리됨
 
     return 0;

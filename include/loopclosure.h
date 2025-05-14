@@ -1,9 +1,9 @@
 #ifndef LOOPCLOSURE_H
 #define LOOPCLOSURE_H
 
-#include "utility.h"
-#include "Scancontext.h"
-#include "costmap.h"
+#include "liorf/include/utility.h"
+#include "liorf/include/Scancontext.h"
+#include "liorf/include/costmap.h"
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -52,7 +52,12 @@ void PublishCloudMsg(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Sha
 class LoopClosure
 {
 public:
-    LoopClosure(rclcpp::Node* node);
+    // 수정된 생성자 - 파라미터를 명시적으로 받음
+    LoopClosure(rclcpp::Node* node, 
+                double historyKeyframeSearchRadius,
+                int historyKeyframeSearchNum,
+                double historyKeyframeSearchTimeDiff,
+                double historyKeyframeFitnessScore);
     ~LoopClosure();
     
     // 루프 클로저 스레드 함수
@@ -62,7 +67,8 @@ public:
     void setInputData(pcl::PointCloud<PointType>::Ptr& keyPoses3D, 
                      pcl::PointCloud<PointTypePose>::Ptr& keyPoses6D,
                      std::vector<pcl::PointCloud<PointType>::Ptr>& surfKeyFrames,
-                     double currentTimestamp);
+                     double currentTimestamp,
+                     pcl::PointCloud<PointType>::Ptr currentScan = nullptr);
     
     // 루프 감지 및 처리
     void loopInfoHandler(const std_msgs::msg::Float64MultiArray::SharedPtr loopMsg);

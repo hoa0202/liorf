@@ -130,8 +130,8 @@ public:
 
     GeographicLib::LocalCartesian gps_trans_;
 
-    // scancontext loop closure
-    SCManager scManager;
+    // scancontext loop closure는 LoopClosure 클래스에서 관리
+    // SCManager scManager;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> br;
 
