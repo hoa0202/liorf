@@ -25,12 +25,12 @@ public:
   : Node("removert_node")
   {
     // 파라미터 선언
-    this->declare_parameter<std::string>("global_map_topic", "/liorf/mapping/map_global");
-    this->declare_parameter<std::string>("local_cloud_topic", "/liorf/mapping/cloud_registered_raw");
-    this->declare_parameter<double>("voxel_size", 0.3);
+    this->declare_parameter<std::string>("global_map_topic", "/liorf_localization/localization/global_map");
+    this->declare_parameter<std::string>("local_cloud_topic", "/liorf_localization/mapping/cloud_registered");
+    this->declare_parameter<double>("voxel_size", 0.5);
     this->declare_parameter<double>("interest_radius", 5.0);
-    this->declare_parameter<int>("frame_threshold", 20);
-    this->declare_parameter<int>("accumulation_frames", 30);
+    this->declare_parameter<int>("frame_threshold", 10);
+    this->declare_parameter<int>("accumulation_frames", 10);
     this->declare_parameter<std::string>("robot_base_frame", "base_link");
     this->declare_parameter<bool>("accumulate_dynamic_points_globally", true);
 
@@ -93,60 +93,37 @@ public:
   }
 
 private:
-  // 헬퍼: 인덱스로부터 키 문자열 생성
-  inline std::string keyFromIndices(int ix, int iy, int iz) const {
-    return std::to_string(ix) + "_" + std::to_string(iy) + "_" + std::to_string(iz);
-  }
-
-  // 삭제된 voxel 키의 이웃까지 검사해서 제거 대상인지 판단
-  bool shouldBeRemoved(const PointT &pt) const {
-    int ix = static_cast<int>(std::floor(pt.x / voxel_size_));
-    int iy = static_cast<int>(std::floor(pt.y / voxel_size_));
-    int iz = static_cast<int>(std::floor(pt.z / voxel_size_));
-
-    // 주변 ±1 셀을 모두 검사
-    for (int dx = -1; dx <= 1; ++dx) {
-      for (int dy = -1; dy <= 1; ++dy) {
-        for (int dz = -1; dz <= 1; ++dz) {
-          if (removed_voxel_keys_.count(keyFromIndices(ix+dx, iy+dy, iz+dz)))
-            return true;
-        }
-      }
-    }
-    return false;
-  }
-
   void globalMapCB(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
-    auto temp = std::make_shared<pcl::PointCloud<PointT>>();
-    pcl::fromROSMsg(*msg, *temp);
-
-    if (temp->empty()) {
-      RCLCPP_WARN(get_logger(), "Received empty global_map. Ignoring.");
-      return;
+    if (global_map_received_) {
+        RCLCPP_INFO(get_logger(), "Global map already received and processed. Ignoring new map.");
+        return;
     }
+    
+    auto temp_global_map = std::make_shared<pcl::PointCloud<PointT>>();
+    pcl::fromROSMsg(*msg, *temp_global_map);
 
-    // → 삭제된 키 이웃까지 포함해 필터링
-    auto filtered = std::make_shared<pcl::PointCloud<PointT>>();
-    filtered->header = temp->header;
-    for (const auto &pt : *temp) {
-      if (!shouldBeRemoved(pt)) {
-        filtered->push_back(pt);
+    if (!temp_global_map->empty()) {
+      global_map_ = temp_global_map;
+      RCLCPP_INFO(get_logger(),
+        "Loaded global_map (%zu pts). Frame ID: %s", global_map_->points.size(), msg->header.frame_id.c_str());
+      global_map_frame_id_ = msg->header.frame_id;
+      global_map_received_ = true;
+
+      if (accumulated_dyn_cloud_pcl_ && global_map_ && !global_map_->empty()) {
+          accumulated_dyn_cloud_pcl_->header = global_map_->header; // Copy PCL header
       }
+
+      global_sub_.reset(); 
+      RCLCPP_INFO(get_logger(), "Global map subscription has been shut down.");
+    } else {
+      RCLCPP_WARN(get_logger(), "Received empty global_map. Still waiting.");
     }
-
-    global_map_ = filtered;
-    global_map_frame_id_ = msg->header.frame_id;
-    RCLCPP_INFO(get_logger(),
-      "Received new global_map: raw %zu pts -> filtered %zu pts (removed %zu keys).",
-      temp->size(), global_map_->size(), removed_voxel_keys_.size());
   }
-
 
   void localCloudCB(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
-    // if (!global_map_received_ || !global_map_ || global_map_->empty()) {
-    if (!global_map_ || global_map_->empty()) {    
+    if (!global_map_received_ || !global_map_ || global_map_->empty()) {
       RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
         "Global_map not ready or empty, skipping local cloud processing.");
       return;
@@ -291,92 +268,48 @@ private:
 
     const double interest_radius_sq = interest_radius_ * interest_radius_;
 
-    // if (global_map_) { 
-    //     for (const auto &pt_map : global_map_->points)
-    //     {
-    //       double dx = pt_map.x - bx;
-    //       double dy = pt_map.y - by;
-    //       double dz = pt_map.z - bz;
-    //       double dist_sq_to_robot = dx * dx + dy * dy + dz * dz;
+    if (global_map_) { 
+        for (const auto &pt_map : global_map_->points)
+        {
+          double dx = pt_map.x - bx;
+          double dy = pt_map.y - by;
+          double dz = pt_map.z - bz;
+          double dist_sq_to_robot = dx * dx + dy * dy + dz * dz;
 
-    //       if (dist_sq_to_robot > interest_radius_sq) {
-    //         next_global_map->push_back(pt_map);
-    //         continue;
-    //       }
-    //       points_in_interest_radius++;
-
-    //       std::string key = voxelKey(pt_map);
-    //       bool seen_in_accumulated_local_scan = accumulated_local_voxels.count(key);
-
-    //       if (seen_in_accumulated_local_scan) {
-    //         miss_counter_[key] = 0;
-    //         next_global_map->push_back(pt_map);
-    //         points_kept_static_in_radius++;
-    //       } else {
-    //         int cnt = ++miss_counter_[key];
-    //         if (cnt >= frame_threshold_) {
-    //           pcl::PointXYZRGB p_dyn;
-    //           p_dyn.x = pt_map.x; p_dyn.y = pt_map.y; p_dyn.z = pt_map.z;
-    //           p_dyn.r = 255; p_dyn.g = 0; p_dyn.b = 0; 
-              
-    //           if (accumulate_dynamic_points_globally_) {
-    //             if(accumulated_dyn_cloud_pcl_) accumulated_dyn_cloud_pcl_->push_back(p_dyn);
-    //           } else {
-    //             current_frame_dyn_cloud_pcl->push_back(p_dyn);
-    //           }
-    //           dynamic_points_found_this_frame++;
-    //         } else {
-    //           next_global_map->push_back(pt_map);
-    //           points_kept_dynamic_pending_in_radius++;
-    //         }
-    //       }
-    //     }
-    // }
-    if (global_map_) {
-      for (const auto &pt_map : global_map_->points)
-      {
-        // 1) 이미 영구 제거된 voxel이면 무조건 건너뛴다
-        std::string key = voxelKey(pt_map);
-        if (removed_voxel_keys_.count(key)) {
-          continue;
-        }
-
-        // 2) 로봇으로부터 거리 확인
-        double dx = pt_map.x - bx, dy = pt_map.y - by, dz = pt_map.z - bz;
-        double dist_sq_to_robot = dx*dx + dy*dy + dz*dz;
-        if (dist_sq_to_robot > interest_radius_sq) {
-          next_global_map->push_back(pt_map);
-          continue;
-        }
-
-        // 3) 관심 반경 내: local scan에 보이면 static, 아니면 miss 카운트
-        bool seen = accumulated_local_voxels.count(key);
-        if (seen) {
-          miss_counter_[key] = 0;
-          next_global_map->push_back(pt_map);
-          points_kept_static_in_radius++;
-        } else {
-          int cnt = ++miss_counter_[key];
-          if (cnt >= frame_threshold_) {
-            // → 한 번 동적으로 판단되면 영구 제거 리스트에 추가
-            removed_voxel_keys_.insert(key);
-            pcl::PointXYZRGB p_dyn;
-            p_dyn.x = pt_map.x; p_dyn.y = pt_map.y; p_dyn.z = pt_map.z;
-            p_dyn.r = 255; p_dyn.g = 0; p_dyn.b = 0; 
-            
-            if (accumulate_dynamic_points_globally_) {
-              if(accumulated_dyn_cloud_pcl_) accumulated_dyn_cloud_pcl_->push_back(p_dyn);
-            } else {
-              current_frame_dyn_cloud_pcl->push_back(p_dyn);
-            }            
-            dynamic_points_found_this_frame++;
-          } else {
+          if (dist_sq_to_robot > interest_radius_sq) {
             next_global_map->push_back(pt_map);
-            points_kept_dynamic_pending_in_radius++;
+            continue;
+          }
+          points_in_interest_radius++;
+
+          std::string key = voxelKey(pt_map);
+          bool seen_in_accumulated_local_scan = accumulated_local_voxels.count(key);
+
+          if (seen_in_accumulated_local_scan) {
+            miss_counter_[key] = 0;
+            next_global_map->push_back(pt_map);
+            points_kept_static_in_radius++;
+          } else {
+            int cnt = ++miss_counter_[key];
+            if (cnt >= frame_threshold_) {
+              pcl::PointXYZRGB p_dyn;
+              p_dyn.x = pt_map.x; p_dyn.y = pt_map.y; p_dyn.z = pt_map.z;
+              p_dyn.r = 255; p_dyn.g = 0; p_dyn.b = 0; 
+              
+              if (accumulate_dynamic_points_globally_) {
+                if(accumulated_dyn_cloud_pcl_) accumulated_dyn_cloud_pcl_->push_back(p_dyn);
+              } else {
+                current_frame_dyn_cloud_pcl->push_back(p_dyn);
+              }
+              dynamic_points_found_this_frame++;
+            } else {
+              next_global_map->push_back(pt_map);
+              points_kept_dynamic_pending_in_radius++;
+            }
           }
         }
-      }
     }
+
     global_map_ = next_global_map;
 
     RCLCPP_INFO(get_logger(),
@@ -442,14 +375,13 @@ private:
   bool   accumulate_dynamic_points_globally_;
 
   // State
-  pcl::PointCloud<PointT>::Ptr global_map_{nullptr};        // 원본 global map
-  pcl::PointCloud<PointT>::Ptr remove_map_{nullptr}; 
+  pcl::PointCloud<PointT>::Ptr global_map_ = nullptr;
   std::string global_map_frame_id_ = "map";
-  // bool global_map_received_ = false;
+  bool global_map_received_ = false;
   std::unordered_map<std::string, int> miss_counter_;
   std::deque<pcl::PointCloud<PointT>::Ptr> local_scan_accumulator_;
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr accumulated_dyn_cloud_pcl_ = nullptr;
-  std::unordered_set<std::string> removed_voxel_keys_;
+
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr global_sub_, local_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr dyn_pub_, filtered_pub_;

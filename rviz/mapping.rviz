@@ -7,11 +7,8 @@ Panels:
         - /Global Options1
         - /Mapping1
         - /Mapping1/LIO1/Topic1
-        - /Image1
-        - /Map1
-        - /PointCloud24
       Splitter Ratio: 0.5
-    Tree Height: 1030
+    Tree Height: 671
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -115,7 +112,7 @@ Visualization Manager:
           Axis: Z
           Channel Name: intensity
           Class: rviz_default_plugins/PointCloud2
-          Color: 255; 255; 255
+          Color: 0; 255; 0
           Color Transformer: FlatColor
           Decay Time: 0
           Enabled: true
@@ -127,7 +124,7 @@ Visualization Manager:
           Name: GlobalMap
           Position Transformer: XYZ
           Selectable: true
-          Size (Pixels): 1.5
+          Size (Pixels): 5
           Size (m): 0.009999999776482582
           Style: Points
           Topic:
@@ -222,35 +219,11 @@ Visualization Manager:
         All Enabled: false
         base_link:
           Value: true
-        gps:
-          Value: true
-        imu_link:
-          Value: true
         livox_frame:
           Value: true
         map:
           Value: true
         odom:
-          Value: true
-        os_imu:
-          Value: true
-        os_lidar:
-          Value: true
-        os_sensor:
-          Value: true
-        zed_camera_center:
-          Value: true
-        zed_camera_link:
-          Value: true
-        zed_imu_link:
-          Value: true
-        zed_left_camera_frame:
-          Value: true
-        zed_left_camera_optical_frame:
-          Value: true
-        zed_right_camera_frame:
-          Value: true
-        zed_right_camera_optical_frame:
           Value: true
       Marker Scale: 1
       Name: TF
@@ -261,27 +234,8 @@ Visualization Manager:
         map:
           odom:
             base_link:
-              gps:
-                {}
-              imu_link:
-                {}
               livox_frame:
                 {}
-              os_sensor:
-                os_imu:
-                  {}
-                os_lidar:
-                  {}
-              zed_camera_link:
-                zed_camera_center:
-                  zed_left_camera_frame:
-                    zed_imu_link:
-                      {}
-                    zed_left_camera_optical_frame:
-                      {}
-                  zed_right_camera_frame:
-                    zed_right_camera_optical_frame:
-                      {}
       Update Interval: 0
       Value: true
     - Angle Tolerance: 0.10000000149011612
@@ -335,102 +289,6 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /liorf/mapping/loop_closure_constraints
       Value: false
-    - Class: rviz_default_plugins/Image
-      Enabled: true
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: Image
-      Normalize Range: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /zed/zed_node/rgb/image_rect_color
-      Value: true
-    - Class: rviz_default_plugins/Image
-      Enabled: true
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: Image
-      Normalize Range: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /zed/zed_node/rgb/image_rect_color
-      Value: true
-    - Alpha: 1
-      Autocompute Intensity Bounds: true
-      Autocompute Value Bounds:
-        Max Value: 10
-        Min Value: -10
-        Value: true
-      Axis: Z
-      Channel Name: intensity
-      Class: rviz_default_plugins/PointCloud2
-      Color: 255; 0; 0
-      Color Transformer: FlatColor
-      Decay Time: 0
-      Enabled: false
-      Invert Rainbow: false
-      Max Color: 255; 255; 255
-      Max Intensity: 4096
-      Min Color: 0; 0; 0
-      Min Intensity: 0
-      Name: PointCloud2
-      Position Transformer: XYZ
-      Selectable: true
-      Size (Pixels): 3
-      Size (m): 0.20000000298023224
-      Style: Flat Squares
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /narf_edge_points
-      Use Fixed Frame: true
-      Use rainbow: true
-      Value: false
-    - Alpha: 1
-      Autocompute Intensity Bounds: true
-      Autocompute Value Bounds:
-        Max Value: 10
-        Min Value: -10
-        Value: true
-      Axis: Z
-      Channel Name: intensity
-      Class: rviz_default_plugins/PointCloud2
-      Color: 0; 0; 255
-      Color Transformer: FlatColor
-      Decay Time: 0
-      Enabled: false
-      Invert Rainbow: false
-      Max Color: 255; 255; 255
-      Max Intensity: 4096
-      Min Color: 0; 0; 0
-      Min Intensity: 0
-      Name: PointCloud2
-      Position Transformer: XYZ
-      Selectable: true
-      Size (Pixels): 3
-      Size (m): 0.20000000298023224
-      Style: Flat Squares
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /narf_plane_points
-      Use Fixed Frame: true
-      Use rainbow: true
-      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
@@ -459,34 +317,6 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /liorf/mapping/path
       Value: true
-    - Alpha: 1
-      Buffer Length: 1
-      Class: rviz_default_plugins/Path
-      Color: 255; 0; 0
-      Enabled: false
-      Head Diameter: 0.30000001192092896
-      Head Length: 0.20000000298023224
-      Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 0.029999999329447746
-      Name: Path
-      Offset:
-        X: 0
-        Y: 0
-        Z: 0
-      Pose Color: 255; 85; 255
-      Pose Style: None
-      Radius: 0.029999999329447746
-      Shaft Diameter: 0.10000000149011612
-      Shaft Length: 0.10000000149011612
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /est_path
-      Value: false
     - Alpha: 0.699999988079071
       Class: rviz_default_plugins/Map
       Color Scheme: map
@@ -499,14 +329,48 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /liorf/costmap
+        Value: /grid_map
       Update Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /liorf/costmap_updates
+        Value: /grid_map_updates
       Use Timestamp: false
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: PointCloud2
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.10000000149011612
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /dynamic_points
+      Use Fixed Frame: true
+      Use rainbow: true
       Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
@@ -523,14 +387,14 @@ Visualization Manager:
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 5567
+      Max Intensity: 4096
       Min Color: 0; 0; 0
-      Min Intensity: 6
+      Min Intensity: 0
       Name: PointCloud2
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.009999999776482582
+      Size (m): 0.10000000149011612
       Style: Flat Squares
       Topic:
         Depth: 5
@@ -538,7 +402,7 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /filtered/points
+        Value: /remove_global_map
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -585,16 +449,16 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 116.43409729003906
+      Distance: 27.0137882232666
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.5713531374931335
-        Y: 0.5491222143173218
-        Z: 1.3455489873886108
+        X: -0.2758587896823883
+        Y: 0.12270937860012054
+        Z: 0.8896710872650146
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
@@ -603,23 +467,21 @@ Visualization Manager:
       Pitch: 1.5697963237762451
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 4.666861057281494
+      Yaw: 2.6850457191467285
     Saved: ~
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 1403
+  Height: 816
   Hide Left Dock: false
   Hide Right Dock: true
-  Image:
-    collapsed: false
   Navigation 2:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000003000000000000015600000525fc0200000004fb000000100044006900730070006c006100790073010000003b00000441000000c700fffffffb000000220053006c0061006d0054006f006f006c0062006f00780050006c007500670069006e00000001080000016d0000016d00fffffffb00000018004e0061007600690067006100740069006f006e00200032000000021d000002bc0000012300fffffffb0000000a0049006d0061006700650100000482000000de0000002800ffffff00000001000001cb000003b9fc0200000001fb0000000a00560069006500770073000000003d000003b9000000a000ffffff00000002000004a000000094fc0100000007fc00000000000004a00000000000fffffffa000000010200000002fb0000000a0049006d00610067006502000005aa0000085900000456000000e3fb0000000a0049006d006100670065010000003b000000e30000000000000000fb0000000a0049006d0061006700650000000000000005f70000000000000000fc00000000000005f70000000000fffffffa000000000200000002fb0000000a0049006d0061006700650000000000ffffffff0000000000000000fb0000000a0049006d006100670065000000003b000000e30000000000000000fb0000000a0049006d00610067006502000002d800000228000005ac000000a0fb0000000a0049006d006100670065020000008200000138000007e2000002a0fc00000000000005f70000000000fffffffa000000000200000002fb0000000a0049006d00610067006502000002df000001cc000005ab00000060fb0000000a0049006d006100670065010000003b000000e30000000000000000fb0000000a0049006d0061006700650100000000000005590000000000000000000006970000052500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd000000030000000000000156000002dafc0200000004fb000000100044006900730070006c006100790073010000003b000002da000000c700fffffffb000000220053006c0061006d0054006f006f006c0062006f00780050006c007500670069006e00000001080000016d0000016d00fffffffb00000018004e0061007600690067006100740069006f006e00200032000000021d000002bc0000012300fffffffb0000000a0049006d006100670065010000029b0000007a000000000000000000000001000001cb000003b9fc0200000001fb0000000a00560069006500770073000000003d000003b9000000a000ffffff00000002000004a000000094fc0100000007fc00000000000004a00000000000fffffffa000000000200000002fb0000000a0049006d0061006700650200000a00000004bd00000456000000e3fb0000000a0049006d006100670065010000003b000000e30000000000000000fb0000000a0049006d0061006700650000000000000005f70000000000000000fc00000000000005f70000000000fffffffa000000000200000002fb0000000a0049006d0061006700650000000000ffffffff0000000000000000fb0000000a0049006d006100670065000000003b000000e30000000000000000fb0000000a0049006d00610067006502000002d800000228000005ac000000a0fb0000000a0049006d006100670065020000008200000138000007e2000002a0fc00000000000005f70000000000fffffffa000000000200000002fb0000000a0049006d00610067006502000002df000001cc000005ab00000060fb0000000a0049006d006100670065010000003b000000e30000000000000000fb0000000a0049006d0061006700650100000000000005590000000000000000000002b5000002da00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   SlamToolboxPlugin:
     collapsed: false
   Views:
     collapsed: true
-  Width: 2035
-  X: 6233
-  Y: 674
+  Width: 1041
+  X: 2662
+  Y: 310

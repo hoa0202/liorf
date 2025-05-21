@@ -165,6 +165,32 @@ install(TARGETS removert_node
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 
+# Localization Node
+add_executable(localization_node src/localization_node.cpp)
+
+ament_target_dependencies(localization_node
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  nav_msgs
+  tf2_ros
+  tf2_sensor_msgs
+  tf2_geometry_msgs
+  pcl_conversions
+  visualization_msgs
+  pcl_msgs
+  tf2_eigen    
+  pcl_ros
+)
+
+target_link_libraries(localization_node
+  ${PCL_LIBRARIES}
+)
+
+install(TARGETS localization_node
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
 
 install(
   DIRECTORY launch config rviz

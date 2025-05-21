@@ -27,10 +27,10 @@ public:
     // 파라미터 선언
     this->declare_parameter<std::string>("global_map_topic", "/liorf/mapping/map_global");
     this->declare_parameter<std::string>("local_cloud_topic", "/liorf/mapping/cloud_registered_raw");
-    this->declare_parameter<double>("voxel_size", 0.3);
+    this->declare_parameter<double>("voxel_size", 0.5);
     this->declare_parameter<double>("interest_radius", 5.0);
-    this->declare_parameter<int>("frame_threshold", 20);
-    this->declare_parameter<int>("accumulation_frames", 30);
+    this->declare_parameter<int>("frame_threshold", 10);
+    this->declare_parameter<int>("accumulation_frames", 10);
     this->declare_parameter<std::string>("robot_base_frame", "base_link");
     this->declare_parameter<bool>("accumulate_dynamic_points_globally", true);
 
@@ -93,55 +93,54 @@ public:
   }
 
 private:
-  // 헬퍼: 인덱스로부터 키 문자열 생성
-  inline std::string keyFromIndices(int ix, int iy, int iz) const {
-    return std::to_string(ix) + "_" + std::to_string(iy) + "_" + std::to_string(iz);
-  }
-
-  // 삭제된 voxel 키의 이웃까지 검사해서 제거 대상인지 판단
-  bool shouldBeRemoved(const PointT &pt) const {
-    int ix = static_cast<int>(std::floor(pt.x / voxel_size_));
-    int iy = static_cast<int>(std::floor(pt.y / voxel_size_));
-    int iz = static_cast<int>(std::floor(pt.z / voxel_size_));
-
-    // 주변 ±1 셀을 모두 검사
-    for (int dx = -1; dx <= 1; ++dx) {
-      for (int dy = -1; dy <= 1; ++dy) {
-        for (int dz = -1; dz <= 1; ++dz) {
-          if (removed_voxel_keys_.count(keyFromIndices(ix+dx, iy+dy, iz+dz)))
-            return true;
-        }
-      }
-    }
-    return false;
-  }
-
   void globalMapCB(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
+    // if (global_map_received_) {
+    //     RCLCPP_INFO(get_logger(), "Global map already received and processed. Ignoring new map.");
+    //     return;
+    // }
     auto temp = std::make_shared<pcl::PointCloud<PointT>>();
+
     pcl::fromROSMsg(*msg, *temp);
 
-    if (temp->empty()) {
+    if (!temp->empty()) {
       RCLCPP_WARN(get_logger(), "Received empty global_map. Ignoring.");
       return;
     }
+      
+      // global_map_ = temp_global_map;
+      // RCLCPP_INFO(get_logger(),
+      //   "Loaded global_map (%zu pts). Frame ID: %s", global_map_->points.size(), msg->header.frame_id.c_str());
+      // global_map_frame_id_ = msg->header.frame_id;
+      // global_map_received_ = true;
 
-    // → 삭제된 키 이웃까지 포함해 필터링
-    auto filtered = std::make_shared<pcl::PointCloud<PointT>>();
-    filtered->header = temp->header;
-    for (const auto &pt : *temp) {
-      if (!shouldBeRemoved(pt)) {
-        filtered->push_back(pt);
-      }
-    }
+      // if (accumulated_dyn_cloud_pcl_ && global_map_ && !global_map_->empty()) {
+      //     accumulated_dyn_cloud_pcl_->header = global_map_->header; // Copy PCL header
+      // }
 
-    global_map_ = filtered;
-    global_map_frame_id_ = msg->header.frame_id;
-    RCLCPP_INFO(get_logger(),
-      "Received new global_map: raw %zu pts -> filtered %zu pts (removed %zu keys).",
-      temp->size(), global_map_->size(), removed_voxel_keys_.size());
+      // global_sub_.reset(); 
+      // RCLCPP_INFO(get_logger(), "Global map subscription has been shut down.");
+      // 새로운 global map 으로 매번 갱신
+      // global_map_ = temp_global_map;
+      // global_map_frame_id_ = msg->header.frame_id;
+      // RCLCPP_INFO(get_logger(),
+      //   "Updated global_map (%zu pts). Frame ID: %s", global_map_->points.size(), global_map_frame_id_.c_str());
+      // → 기존에 제거된 voxel은 제외하고 새 맵 갱신
+      // auto filtered = std::make_shared<pcl::PointCloud<PointT>>();
+      // filtered->header = temp_global_map->header;
+      // for (const auto &pt : *temp_global_map) {
+      //   if (removed_voxel_keys_.count(voxelKey(pt)) == 0)
+      //     filtered->push_back(pt);
+      // }
+      // global_map_ = filtered;
+      global_map_ = temp;
+      global_map_frame_id_ = msg->header.frame_id;
+      RCLCPP_INFO(get_logger(), "Received new global_map (%zu pts).", global_map_->size());
+      // 동적 포인트 누적 클라우드 헤더도 업데이트
+      // if (accumulated_dyn_cloud_pcl_) {
+      //     accumulated_dyn_cloud_pcl_->header = global_map_->header;
+      // }      
   }
-
 
   void localCloudCB(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {

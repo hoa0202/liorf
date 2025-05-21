@@ -24,7 +24,7 @@
 #include "liorf/include/Scancontext.h"
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <numeric> // for std::accumulate
-#include "liorf/include/costmap.h" // 코스트맵 생성기 클래스 헤더 추가
+// #include "liorf/include/costmap.h" // 코스트맵 생성기 클래스 헤더 추가
 #include "liorf/include/loopclosure.h" // Loop Closure 클래스 헤더 추가
 
 #include "liorf/include/mapOptimization.h"
@@ -75,15 +75,15 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
         allocateMemory();
         
         // 코스트맵 발행자 생성
-        costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/liorf/costmap", 10);
+        // costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/liorf/costmap", 10);
         
-        // 코스트맵 생성기 초기화
-        costmap_generator_ = std::make_unique<CostmapGenerator>(this);
+        // // 코스트맵 생성기 초기화
+        // costmap_generator_ = std::make_unique<CostmapGenerator>(this);
         
         // 파라미터 설정
-        double costmap_resolution = this->declare_parameter<double>("costmap_resolution", 0.1);
-        double costmap_width = this->declare_parameter<double>("costmap_width", 20.0);     // 너비 축소
-        double costmap_height = this->declare_parameter<double>("costmap_height", 20.0);   // 높이 축소
+        // double costmap_resolution = this->declare_parameter<double>("costmap_resolution", 0.1);
+        // double costmap_width = this->declare_parameter<double>("costmap_width", 20.0);     // 너비 축소
+        // double costmap_height = this->declare_parameter<double>("costmap_height", 20.0);   // 높이 축소
         double min_height_threshold = this->declare_parameter<double>("min_height_threshold", 0.15);
         double max_height_threshold = this->declare_parameter<double>("max_height_threshold", 1.1);
         int obstacle_threshold = this->declare_parameter<int>("obstacle_threshold", 2);
@@ -93,12 +93,12 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
         bool auto_resize_map = this->declare_parameter<bool>("auto_resize_map", true);
         
         // 코스트맵 생성기에 파라미터 전달
-        costmap_generator_->setParameters(
-            costmap_resolution, costmap_width, costmap_height,
-            min_height_threshold, max_height_threshold,
-            obstacle_threshold, point_threshold, height_diff_threshold,
-            base_frame_id, auto_resize_map
-        );
+        // costmap_generator_->setParameters(
+        //     costmap_resolution, costmap_width, costmap_height,
+        //     min_height_threshold, max_height_threshold,
+        //     obstacle_threshold, point_threshold, height_diff_threshold,
+        //     base_frame_id, auto_resize_map
+        // );
 
     // Loop Closure 모듈 초기화 - 명시적으로 파라미터 전달
     double historyKeyframeSearchRadius = 10.0;
@@ -200,14 +200,14 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
             publishFrames();
         }
     
-    // 코스트맵 생성기에 데이터 전달
-    if (costmap_generator_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
-        // PCL의 points 멤버를 std::vector<PointTypePose>로 변환
-        std::vector<PointTypePose> keyPoses6DVector(cloudKeyPoses6D->points.begin(), cloudKeyPoses6D->points.end());
+    // // 코스트맵 생성기에 데이터 전달
+    // if (costmap_generator_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
+    //     // PCL의 points 멤버를 std::vector<PointTypePose>로 변환
+    //     std::vector<PointTypePose> keyPoses6DVector(cloudKeyPoses6D->points.begin(), cloudKeyPoses6D->points.end());
         
-        // 코스트맵 데이터 업데이트
-        costmap_generator_->processClouds(cloudKeyPoses3D, surfCloudKeyFrames, keyPoses6DVector);
-    }
+    //     // 코스트맵 데이터 업데이트
+    //     costmap_generator_->processClouds(cloudKeyPoses3D, surfCloudKeyFrames, keyPoses6DVector);
+    // }
     
     // Loop Closure 모듈에 데이터 전달
     if (loop_closure_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
@@ -523,11 +523,12 @@ void mapOptimization::publishGlobalMap()
             pt.intensity = cloudKeyPoses3D->points[pointSearchIndGlobalMap[0]].intensity;
         }
 
-        // extract visualized and downsampled key frames
+        // extract visualized and downsampled key frames (offset 적용)
         for (int i = 0; i < (int)globalMapKeyPosesDS->size(); ++i){
             int thisKeyInd = (int)globalMapKeyPosesDS->points[i].intensity;
-            // 오프셋을 고려한 변환 함수 사용
-            *globalMapKeyFrames += *transformPointCloud(surfCloudKeyFrames[thisKeyInd], &cloudKeyPoses6D->points[thisKeyInd]);
+            *globalMapKeyFrames += *transformPointCloudWithLidarOffset(
+                                      surfCloudKeyFrames[thisKeyInd],
+                                      &cloudKeyPoses6D->points[thisKeyInd]);
         }
         // downsample visualized points
         pcl::VoxelGrid<PointType> downSizeFilterGlobalMapKeyFrames; // for global map visualization
@@ -1038,13 +1039,13 @@ void mapOptimization::publishFrames()
     }
 
     // 맵 크기 자동 조정 함수
-void mapOptimization::updateMapSize(const pcl::PointCloud<PointType>::Ptr& cloud)
-{
-    // CostmapGenerator 내부에서 맵 크기와 경계 관리
-    if (costmap_generator_) {
-        costmap_generator_->updateMapSize(cloud);
-    }
-}
+// void mapOptimization::updateMapSize(const pcl::PointCloud<PointType>::Ptr& cloud)
+// {
+//     // CostmapGenerator 내부에서 맵 크기와 경계 관리
+//     if (costmap_generator_) {
+//         costmap_generator_->updateMapSize(cloud);
+//     }
+// }
 
 // 메모리 관리를 위한 새로운 함수: 오래된 키프레임 관리
 void mapOptimization::clearOldFrames()
@@ -1179,7 +1180,10 @@ void mapOptimization::extractCloud(pcl::PointCloud<PointType>::Ptr cloudToExtrac
         } else {
             // transformed cloud not available
             pcl::PointCloud<PointType> laserCloudCornerTemp;
-            pcl::PointCloud<PointType> laserCloudSurfTemp = *transformPointCloud(surfCloudKeyFrames[thisKeyInd],    &cloudKeyPoses6D->points[thisKeyInd]);
+            pcl::PointCloud<PointType> laserCloudSurfTemp =
+                *transformPointCloudWithLidarOffset(
+                    surfCloudKeyFrames[thisKeyInd],
+                    &cloudKeyPoses6D->points[thisKeyInd]);
             *laserCloudSurfFromMap   += laserCloudSurfTemp;
             laserCloudMapContainer[thisKeyInd] = make_pair(laserCloudCornerTemp, laserCloudSurfTemp);
         }
@@ -1251,7 +1255,10 @@ void mapOptimization::extractSurroundingKeyFrames()
         {
             // transformed cloud not available
             pcl::PointCloud<PointType> laserCloudCornerTemp;
-            pcl::PointCloud<PointType> laserCloudSurfTemp = *transformPointCloud(surfCloudKeyFrames[thisKeyInd], &cloudKeyPoses6D->points[thisKeyInd]);
+            pcl::PointCloud<PointType> laserCloudSurfTemp =
+                *transformPointCloudWithLidarOffset(
+                    surfCloudKeyFrames[thisKeyInd],
+                    &cloudKeyPoses6D->points[thisKeyInd]);
             *laserCloudSurfFromMap += laserCloudSurfTemp;
             laserCloudMapContainer[thisKeyInd] = make_pair(laserCloudCornerTemp, laserCloudSurfTemp);
         }
@@ -1523,10 +1530,10 @@ int main(int argc, char** argv)
 
     std::thread visualizeMapThread(&mapOptimization::visualizeGlobalMapThread, MO);
     
-    // 코스트맵 스레드는 CostmapGenerator 내부에서 시작
-    if (MO->costmap_generator_) {
-        MO->costmap_generator_->startCostmapThread();
-    }
+    // // 코스트맵 스레드는 CostmapGenerator 내부에서 시작
+    // if (MO->costmap_generator_) {
+    //     MO->costmap_generator_->startCostmapThread();
+    // }
 
     exec.spin();
 
