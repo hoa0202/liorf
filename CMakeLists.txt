@@ -48,7 +48,8 @@ find_package(pcl_ros REQUIRED)  # 추가된 부분
 find_package(GTSAM REQUIRED)
 find_package(Eigen REQUIRED)
 find_package(OpenMP REQUIRED)
-find_package(Boost REQUIRED COMPONENTS timer)
+find_package(Boost REQUIRED COMPONENTS timer filesystem system)
+find_package(SQLite3 REQUIRED)  # SQLite3 라이브러리 찾기
 
 set(ros2_lib "rclcpp;rclpy;std_msgs;sensor_msgs;geometry_msgs;nav_msgs;cv_bridge;pcl_msgs;pcl_conversions;visualization_msgs;tf2;tf2_ros;tf2_eigen;tf2_sensor_msgs;tf2_geometry_msgs;pcl_ros")  # pcl_ros 추가
 
@@ -79,11 +80,7 @@ include_directories(
   ${pcl_ros_INCLUDE_DIRS}  # 추가된 부분
 )
 
-# 심볼릭 링크 생성 - 헤더 탐색을 위한 추가 설정
-execute_process(
-  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_SOURCE_DIR}/liorf
-  COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/liorf/include
-)
+# 심볼릭 링크 대신 include 경로만 설정
 
 # link directories
 link_directories(
@@ -110,6 +107,7 @@ add_library(${PROJECT_NAME}_mapOptmization_lib
   src/mapOptmization.cpp 
   src/costmap.cpp 
   src/loopclosure.cpp
+  src/mapDatabase.cpp
   ${common_lib} 
   include/Scancontext.cpp
 )
@@ -123,7 +121,7 @@ if(USE_PCH)
   )
 endif()
 ament_target_dependencies(${PROJECT_NAME}_mapOptmization_lib ${ros2_lib})
-target_link_libraries(${PROJECT_NAME}_mapOptmization_lib Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam)
+target_link_libraries(${PROJECT_NAME}_mapOptmization_lib Boost::timer Boost::filesystem Boost::system "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam ${SQLite3_LIBRARIES})
 
 # Mapping Optimization Executable
 add_executable(${PROJECT_NAME}_mapOptmization src/main.cpp)

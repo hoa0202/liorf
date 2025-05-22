@@ -1,4 +1,5 @@
-#include "liorf/include/utility.h"
+#include "utility.h"
+#include "mapDatabase.h"
 #include "liorf/msg/cloud_info.hpp"
 #include "liorf/srv/save_map.hpp"
 // <!-- liorf_yjz_lucky_boy -->
@@ -21,13 +22,14 @@
 #include <GeographicLib/Geocentric.hpp>
 #include <GeographicLib/LocalCartesian.hpp>
 
-#include "liorf/include/Scancontext.h"
+#include "Scancontext.h"
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <numeric> // for std::accumulate
-#include "liorf/include/costmap.h" // 코스트맵 생성기 클래스 헤더 추가
-#include "liorf/include/loopclosure.h" // Loop Closure 클래스 헤더 추가
+#include <set>     // for std::set
+#include "costmap.h" // 코스트맵 생성기 클래스 헤더 추가
+#include "loopclosure.h" // Loop Closure 클래스 헤더 추가
 
-#include "liorf/include/mapOptimization.h"
+#include "mapOptimization.h"
 
 // 헤더가 이미 필요한 모든 선언을 포함하므로 중복 선언 제거
 // using namespace gtsam;
@@ -122,6 +124,11 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
         historyKeyframeSearchTimeDiff,
         historyKeyframeFitnessScore
     );
+        
+        // 맵 저장 기능 초기화
+        initializeMapSaver();
+        
+        RCLCPP_INFO(this->get_logger(), "Map Saver initialized with path: %s", map_save_path_.c_str());
 }
 
 void mapOptimization::allocateMemory()
@@ -192,8 +199,14 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
 
             correctPoses();
 
-            // 메모리 관리: 너무 오래된 프레임 제거
+            // 메모리 관리 기능 활성화 - 안전한 방식으로 메모리 관리
+            // 10개 키프레임마다 메모리 정리 실행 (가독성 향상)
+            static int frame_counter = 0;
+            frame_counter++;
+            if (cloudKeyPoses3D->size() > max_keyframes_in_memory_ && frame_counter >= 10) {
             clearOldFrames();
+                frame_counter = 0;
+            }
 
             publishOdometry();
 
@@ -408,17 +421,28 @@ bool mapOptimization::saveMapService(const std::shared_ptr<liorf::srv::SaveMap::
 
       cout << "****************************************************" << endl;
       cout << "Saving map to pcd files ..." << endl;
-      if(req->destination.empty()) saveMapDirectory = std::getenv("HOME") + savePCDDirectory;
-      else saveMapDirectory = std::getenv("HOME") + req->destination;
+      if(req->destination.empty()) {
+          // yaml 파일에서 설정한 경로 사용
+          saveMapDirectory = map_save_path_ + "/PCD";
+      } else {
+          // 사용자 지정 경로 사용 - 절대 경로인지 확인
+          if (req->destination[0] == '/') {
+              saveMapDirectory = req->destination;
+          } else {
+              saveMapDirectory = map_save_path_ + "/" + req->destination;
+          }
+      }
       cout << "Save destination: " << saveMapDirectory << endl;
+      
       // create directory and remove old files;
       int unused = system((std::string("exec rm -r ") + saveMapDirectory).c_str());
       unused = system((std::string("mkdir -p ") + saveMapDirectory).c_str());
+      
       // save key frame transformations
       pcl::io::savePCDFileBinary(saveMapDirectory + "/trajectory.pcd", *cloudKeyPoses3D);
       pcl::io::savePCDFileBinary(saveMapDirectory + "/transformations.pcd", *cloudKeyPoses6D);
-      // extract global point cloud map
 
+      // extract global point cloud map
       pcl::PointCloud<PointType>::Ptr globalSurfCloud(new pcl::PointCloud<PointType>());
       pcl::PointCloud<PointType>::Ptr globalSurfCloudDS(new pcl::PointCloud<PointType>());
       pcl::PointCloud<PointType>::Ptr globalMapCloud(new pcl::PointCloud<PointType>());
@@ -794,21 +818,33 @@ void mapOptimization::saveKeyFramesAndFactor()
         // cout << "****************************************************" << endl;
         // isamCurrentEstimate.print("Current estimate: ");
 
+        // 중요: intensity는 항상 배열 인덱스와 일치하도록 설정
+        // 이렇게 하면 intensity와 벡터 인덱스가 항상 같아 인덱스 변환 문제가 발생하지 않음
         thisPose3D.x = latestEstimate.translation().x();
         thisPose3D.y = latestEstimate.translation().y();
         thisPose3D.z = latestEstimate.translation().z();
-        thisPose3D.intensity = cloudKeyPoses3D->size(); // this can be used as index
+        thisPose3D.intensity = cloudKeyPoses3D->size(); // 현재 배열 크기가 다음 인덱스
         cloudKeyPoses3D->push_back(thisPose3D);
 
         thisPose6D.x = thisPose3D.x;
         thisPose6D.y = thisPose3D.y;
         thisPose6D.z = thisPose3D.z;
-        thisPose6D.intensity = thisPose3D.intensity ; // this can be used as index
+        thisPose6D.intensity = thisPose3D.intensity; // 동일한 인덱스 사용
         thisPose6D.roll  = latestEstimate.rotation().roll();
         thisPose6D.pitch = latestEstimate.rotation().pitch();
         thisPose6D.yaw   = latestEstimate.rotation().yaw();
         thisPose6D.time = timeLaserInfoCur;
         cloudKeyPoses6D->push_back(thisPose6D);
+        
+        // KdTree 업데이트
+        if (cloudKeyPoses3D->size() > 0) {
+            try {
+                kdtreeSurroundingKeyPoses->setInputCloud(cloudKeyPoses3D);
+                kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "[키프레임] KdTree 업데이트 중 오류 발생: %s", e.what());
+            }
+        }
 
         // cout << "****************************************************" << endl;
         // cout << "Pose covariance:" << endl;
@@ -848,6 +884,57 @@ void mapOptimization::saveKeyFramesAndFactor()
 
         // save path for visualization
         updatePath(thisPose6D);
+        
+        // 실제 벡터 인덱스 - intensity 값은 항상 벡터 인덱스와 동일함
+        int keyframeId = static_cast<int>(thisPose3D.intensity);
+        int keyframeIdx = keyframeId; // 인덱스 = ID
+        
+        // 파일로 키프레임 저장 (일정 간격으로)
+        if (use_keyframe_database_ && map_database_ && (keyframeId % save_interval_ == 0)) {
+            // 로그 출력 제한 - 10개마다 상세 로그 출력
+            static int save_counter = 0;
+            save_counter++;
+            bool log_details = (save_counter % 10 == 0);
+            
+            if (log_details) {
+                RCLCPP_INFO(this->get_logger(), 
+                           "┌─────────────────── 키프레임 저장 정보 ─────────────────┐");
+                RCLCPP_INFO(this->get_logger(), 
+                           "│ 키프레임 ID: %3d | 위치: %6.2f, %6.2f, %6.2f       │", 
+                           keyframeId, thisPose6D.x, thisPose6D.y, thisPose6D.z);
+            }
+            
+            // intensity 값과 벡터 인덱스가 항상 같으므로 안전함
+            if (keyframeIdx >= 0 && keyframeIdx < static_cast<int>(surfCloudKeyFrames.size())) {       
+                if (map_database_->saveKeyframe(keyframeId, thisPose6D, thisPose6D.time, surfCloudKeyFrames[keyframeIdx])) {
+                    last_saved_keyframe_id_ = keyframeId;
+                    
+                    if (log_details) {
+                        // 포인트 수 계산
+                        int points_count = surfCloudKeyFrames[keyframeIdx]->size();
+                        
+                        RCLCPP_INFO(this->get_logger(), 
+                                   "│ 저장 결과: 성공 | 포인트 수: %5d | 총 저장 수: %3d  │", 
+                                   points_count, last_saved_keyframe_id_ + 1);
+                        RCLCPP_INFO(this->get_logger(), 
+                                   "└────────────────────────────────────────────────┘");
+                    }
+                } else if (log_details) {
+                    RCLCPP_WARN(this->get_logger(), 
+                               "│ 저장 결과: 실패 | DB 오류 발생                      │");
+                    RCLCPP_INFO(this->get_logger(), 
+                               "└────────────────────────────────────────────────┘");
+                }
+            } else if (log_details) {
+                RCLCPP_ERROR(this->get_logger(), 
+                            "│ 저장 실패: 인덱스 오류 (ID:%d, Idx:%d, Size:%zu)     │", 
+                            keyframeId, keyframeIdx, surfCloudKeyFrames.size());
+                RCLCPP_INFO(this->get_logger(), 
+                           "└────────────────────────────────────────────────┘");
+            }
+        } else {
+            // 저장되지 않는 이유 로깅은 제거 (불필요한 로그 감소)
+        }
     }
 
 void mapOptimization::correctPoses()
@@ -1049,19 +1136,278 @@ void mapOptimization::updateMapSize(const pcl::PointCloud<PointType>::Ptr& cloud
 // 메모리 관리를 위한 새로운 함수: 오래된 키프레임 관리
 void mapOptimization::clearOldFrames()
 {
-    // 최대 키프레임 수 제한 (메모리 사용량 조절)
-    const int maxKeyframeSize = 1000;  // 1000 -> 800
-    
-    if (cloudKeyPoses6D->size() > maxKeyframeSize) {
-        // 조기 반환으로 불필요한 연산 방지
-        if (cloudKeyPoses6D->size() <= maxKeyframeSize + 50) return;
+    // 안전을 위해 너무 많은 키프레임이 있는 경우만 처리
+    if (cloudKeyPoses3D->size() <= max_keyframes_in_memory_) {
+        return;
+    }
+
+    try {
+        // 메모리 정리 실행 카운터 (정적 변수로 선언하여 함수 호출 간 유지)
+        static int clean_counter = 0;
+        clean_counter++;
         
-        // 맵 컨테이너에서만 가장 오래된 데이터 삭제 (정확도 유지)
-        for (int i = 0; i < 50; ++i) {
-            int oldestIdx = i;
-            laserCloudMapContainer.erase(oldestIdx);
+        // 총 키프레임 수와 유지할 키프레임 수 확인
+        int total_frames = cloudKeyPoses3D->size();
+        int frames_to_keep = max_keyframes_in_memory_;
+        int frames_to_remove = total_frames - frames_to_keep;
+        
+        // 현재 프로세스 메모리 사용량 확인 (Linux 시스템)
+        long memory_usage_kb = 0;
+        FILE* file = fopen("/proc/self/status", "r");
+        if (file) {
+            char line[128];
+            while (fgets(line, 128, file) != NULL) {
+                if (strncmp(line, "VmRSS:", 6) == 0) {
+                    sscanf(line, "VmRSS: %ld", &memory_usage_kb);
+                    break;
+                }
+            }
+            fclose(file);
+        }
+        
+        // 메모리 사용 정보 출력 (5회마다 또는 메모리 정리 시에만)
+        bool should_log_verbose = (clean_counter % 5 == 0);
+        
+        if (should_log_verbose) {
+            RCLCPP_INFO(this->get_logger(), 
+                       "┌─────────────────── 메모리 관리 정보 ────────────────────┐");
+            RCLCPP_INFO(this->get_logger(), 
+                       "│ 키프레임: %4d개 | 메모리 제한: %4d개 | 제거 대상: %4d개 │", 
+                       total_frames, frames_to_keep, frames_to_remove);
+            RCLCPP_INFO(this->get_logger(), 
+                       "│ 맵 컨테이너: %4zu개 | 메모리 사용량: %6.1f MB           │", 
+                       laserCloudMapContainer.size(), memory_usage_kb / 1024.0);
+        }
+        
+        // 가장 오래된 키프레임 ID 확인 (정리 대상)
+        std::vector<int> old_frame_ids;
+        for (int i = 0; i < frames_to_remove; i++) {
+            if (i < total_frames) {
+                old_frame_ids.push_back(static_cast<int>(cloudKeyPoses3D->points[i].intensity));
+            }
+        }
+        
+        // 맵 컨테이너에서 오래된 항목 제거
+        int cleared_container = 0;
+        for (int id : old_frame_ids) {
+            if (laserCloudMapContainer.find(id) != laserCloudMapContainer.end()) {
+                laserCloudMapContainer.erase(id);
+                cleared_container++;
+            }
+        }
+        
+        // 맵 캐시를 30% 정도만 유지 (과도한 메모리 사용 방지)
+        if (laserCloudMapContainer.size() > frames_to_keep * 1.3) {
+            int excess_cache = laserCloudMapContainer.size() - frames_to_keep;
+            int items_to_remove = std::min(excess_cache, frames_to_remove);
+            
+            // ID 기준으로 정렬된 맵 복사본 생성
+            std::vector<int> cache_ids;
+            for (auto& item : laserCloudMapContainer) {
+                cache_ids.push_back(item.first);
+            }
+            
+            // 정렬
+            std::sort(cache_ids.begin(), cache_ids.end());
+            
+            // 가장 오래된 캐시 항목 제거
+            int extra_cleared = 0;
+            for (int i = 0; i < items_to_remove && i < static_cast<int>(cache_ids.size()); i++) {
+                laserCloudMapContainer.erase(cache_ids[i]);
+                extra_cleared++;
+            }
+            
+            if (extra_cleared > 0 && should_log_verbose) {
+                RCLCPP_INFO(this->get_logger(), "│ 추가 캐시 정리: %4d개 항목 제거                        │", extra_cleared);
+                cleared_container += extra_cleared;
+            }
+        }
+        
+        // 메모리 정리 결과 출력
+        if (should_log_verbose) {
+            RCLCPP_INFO(this->get_logger(), 
+                       "│ 정리 결과: %4d개 항목 제거됨 | 남은 항목: %4zu개         │", 
+                       cleared_container, laserCloudMapContainer.size());
+            RCLCPP_INFO(this->get_logger(), 
+                       "└────────────────────────────────────────────────────────┘");
+        }
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "[메모리관리] 메모리 정리 중 오류 발생: %s", e.what());
+    }
+}
+
+void mapOptimization::pruneMemoryKeyframes()
+{
+    // 메모리 관리를 완전히 비활성화 - 문제 해결을 위한 임시 조치
+    if (true) {
+        RCLCPP_INFO_THROTTLE(this->get_logger(), 
+                             *this->get_clock(), 
+                             10000, // 10초마다 출력
+                             "[메모리관리] 메모리 관리 비활성화됨 - 현재 키프레임: %zu개", cloudKeyPoses3D->size());
+        return;
+    }
+    
+    // 이하는 사용하지 않음
+    if (cloudKeyPoses3D->size() <= max_keyframes_in_memory_) {
+        return;
+    }
+    
+    std::string memory_mode = "batch_clear";
+    if (this->has_parameter("memory_management_mode")) {
+        this->get_parameter("memory_management_mode", memory_mode);
+    }
+    
+    // 모드에 따라 처리
+    if (memory_mode == "sliding_window") {
+        // 비활성화 - 오류 발생
+        RCLCPP_WARN_THROTTLE(this->get_logger(), 
+                             *this->get_clock(), 
+                             10000, // 10초마다 출력
+                             "[메모리관리] 슬라이딩 윈도우 모드 비활성화됨");
+    } else {
+        // 배치 모드 - 30%의 오래된 키프레임 제거
+        int count = cloudKeyPoses3D->size();
+        if (count > max_keyframes_in_memory_) {
+            RCLCPP_INFO(this->get_logger(), "[메모리관리] 배치 정리 시작: 총 %d개 키프레임", count);
+            // 추가 작업 비활성화
         }
     }
+}
+
+void mapOptimization::extractSurroundingKeyFrames()
+{
+    if (cloudKeyPoses3D->points.empty())
+        return;
+    
+    // 주변 키프레임 추출 결과를 저장할 변수들 초기화
+    if (laserCloudSurfFromMap) laserCloudSurfFromMap->clear();
+    
+    // 빈 포인트 클라우드인 경우 처리
+    if (cloudKeyPoses3D->size() == 0) {
+        RCLCPP_WARN(this->get_logger(), "[맵생성] 키프레임이 없습니다");
+        return;
+    }
+    
+    // extract all the nearby key poses and downsample them
+    pcl::PointCloud<PointType>::Ptr surroundingKeyPoses(new pcl::PointCloud<PointType>());
+    pcl::PointCloud<PointType>::Ptr surroundingKeyPosesDS(new pcl::PointCloud<PointType>());
+    std::vector<int> pointSearchInd;
+    std::vector<float> pointSearchSqDis;
+
+    // 안전 방식: 기본적으로 최근 10개의 키프레임 사용
+    int numPoses = cloudKeyPoses3D->size();
+    int recentPosesToUse = std::min(10, numPoses);
+    
+    for (int i = numPoses - recentPosesToUse; i < numPoses; i++) {
+        surroundingKeyPoses->push_back(cloudKeyPoses3D->points[i]);
+    }
+    
+    // KdTree 검색 시도 (실패 시 최근 키프레임만 사용)
+    try {
+        if (numPoses > 10) { // KdTree 사용이 의미있을 때만 시도
+            // KdTree를 최신 데이터로 업데이트
+            kdtreeSurroundingKeyPoses->setInputCloud(cloudKeyPoses3D);
+        
+            // 현재 위치 주변 키프레임 검색
+            if (kdtreeSurroundingKeyPoses->radiusSearch(cloudKeyPoses3D->back(), (double)surroundingKeyframeSearchRadius, pointSearchInd, pointSearchSqDis) > 0) {
+                // 각 점을 추가
+                for (int i = 0; i < (int)pointSearchInd.size(); ++i) {
+                    int idx = pointSearchInd[i];
+                    if (idx >= 0 && idx < static_cast<int>(cloudKeyPoses3D->size())) {
+                        surroundingKeyPoses->push_back(cloudKeyPoses3D->points[idx]);
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        RCLCPP_WARN(this->get_logger(), "[맵생성] KdTree 검색 실패, 최근 키프레임만 사용: %s", e.what());
+        // 이미 최근 키프레임은 추가되어 있으므로 추가 작업 불필요
+    }
+
+    // 다운샘플링 수행 (안전하게 시도)
+    try {
+        if (surroundingKeyPoses->size() > 10) {
+            downSizeFilterSurroundingKeyPoses.setInputCloud(surroundingKeyPoses);
+            downSizeFilterSurroundingKeyPoses.filter(*surroundingKeyPosesDS);
+        } else {
+            // 다운샘플링 불필요하면 그대로 복사
+            *surroundingKeyPosesDS = *surroundingKeyPoses;
+        }
+    } catch (const std::exception& e) {
+        RCLCPP_WARN(this->get_logger(), "[맵생성] 다운샘플링 실패, 원본 사용: %s", e.what());
+        // 안전하게 원본 사용
+        *surroundingKeyPosesDS = *surroundingKeyPoses;
+    }
+    
+    // 안전 확인: 다운샘플링 결과가 비어있으면 최근 키프레임 사용
+    if (surroundingKeyPosesDS->empty() && numPoses > 0) {
+        RCLCPP_WARN(this->get_logger(), "[맵생성] 다운샘플링 결과 비어있음, 최신 키프레임 사용");
+        surroundingKeyPosesDS->push_back(cloudKeyPoses3D->back());
+    }
+
+    // 이후 extractCloud 함수 내용과 유사하게 변환
+    laserCloudSurfFromMap->clear(); 
+    
+    // 메모리에 있는 키프레임 데이터 합치기
+    int addedClouds = 0;
+    for (int i = 0; i < (int)surroundingKeyPosesDS->size(); ++i)
+    {
+        // 키프레임 ID 얻기
+        PointType& point = surroundingKeyPosesDS->points[i];
+        int keyframeId = static_cast<int>(point.intensity);
+        
+        // ID가 유효한지 확인
+        if (keyframeId < 0 || keyframeId >= static_cast<int>(surfCloudKeyFrames.size())) {
+            continue;
+        }
+        
+        // laserCloudMapContainer에 변환된 포인트 클라우드 저장 (메모리 관리용)
+        if (laserCloudMapContainer.find(keyframeId) == laserCloudMapContainer.end()) {
+            // 변환된 클라우드가 없으면 새로 생성
+            pcl::PointCloud<PointType> laserCloudCornerTemp;
+            pcl::PointCloud<PointType> laserCloudSurfTemp;
+            
+            try {
+                laserCloudSurfTemp = *transformPointCloud(
+                    surfCloudKeyFrames[keyframeId], 
+                    &cloudKeyPoses6D->points[keyframeId]
+                );
+                // 맵 컨테이너에 저장
+                laserCloudMapContainer[keyframeId] = make_pair(laserCloudCornerTemp, laserCloudSurfTemp);
+                
+                // 맵에 추가
+                *laserCloudSurfFromMap += laserCloudSurfTemp;
+                addedClouds++;
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "[맵생성] 포인트 클라우드 변환 중 오류 발생: %s (ID: %d)", 
+                            e.what(), keyframeId);
+            }
+        } else {
+            // 이미 변환된 클라우드가 있으면 재사용
+            *laserCloudSurfFromMap += laserCloudMapContainer[keyframeId].second;
+            addedClouds++;
+        }
+    }
+    
+    if (addedClouds == 0) {
+        RCLCPP_WARN(this->get_logger(), "[맵생성] 추가된 클라우드가 없습니다!");
+        return;
+    }
+
+    // 다운샘플링으로 포인트 클라우드 크기 줄이기
+    try {
+        downSizeFilterLocalMapSurf.setInputCloud(laserCloudSurfFromMap);
+        downSizeFilterLocalMapSurf.filter(*laserCloudSurfFromMapDS);
+        laserCloudSurfFromMapDSNum = laserCloudSurfFromMapDS->size();
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "[맵생성] 최종 다운샘플링 실패: %s", e.what());
+        // 실패 시 그대로 사용
+        *laserCloudSurfFromMapDS = *laserCloudSurfFromMap;
+        laserCloudSurfFromMapDSNum = laserCloudSurfFromMapDS->size();
+    }
+    
+    RCLCPP_DEBUG(this->get_logger(), "[맵생성] 최종 맵 포인트 수: %d, 맵 캐시 크기: %zu", 
+                laserCloudSurfFromMapDSNum, laserCloudMapContainer.size());
 }
 
 void mapOptimization::updateInitialGuess()
@@ -1194,81 +1540,6 @@ void mapOptimization::extractCloud(pcl::PointCloud<PointType>::Ptr cloudToExtrac
     // clear map cache if too large
     if (laserCloudMapContainer.size() > 1000)
         laserCloudMapContainer.clear();
-}
-
-void mapOptimization::extractSurroundingKeyFrames()
-{
-    if (cloudKeyPoses3D->points.empty())
-        return;
-    
-    // 주변 키프레임 추출 결과를 저장할 변수들 초기화
-    if (laserCloudSurfFromMap) laserCloudSurfFromMap->clear();
-    
-    // 추출 방식 변경: extractNearby 함수 내용으로 복원
-    pcl::PointCloud<PointType>::Ptr surroundingKeyPoses(new pcl::PointCloud<PointType>());
-    pcl::PointCloud<PointType>::Ptr surroundingKeyPosesDS(new pcl::PointCloud<PointType>());
-    std::vector<int> pointSearchInd;
-    std::vector<float> pointSearchSqDis;
-
-    // extract all the nearby key poses and downsample them
-    kdtreeSurroundingKeyPoses->setInputCloud(cloudKeyPoses3D); // create kd-tree
-    kdtreeSurroundingKeyPoses->radiusSearch(cloudKeyPoses3D->back(), (double)surroundingKeyframeSearchRadius, pointSearchInd, pointSearchSqDis);
-    for (int i = 0; i < (int)pointSearchInd.size(); ++i)
-    {
-        int id = pointSearchInd[i];
-        surroundingKeyPoses->push_back(cloudKeyPoses3D->points[id]);
-    }
-
-    downSizeFilterSurroundingKeyPoses.setInputCloud(surroundingKeyPoses);
-    downSizeFilterSurroundingKeyPoses.filter(*surroundingKeyPosesDS);
-    for(auto& pt : surroundingKeyPosesDS->points)
-    {
-        kdtreeSurroundingKeyPoses->nearestKSearch(pt, 1, pointSearchInd, pointSearchSqDis);
-        pt.intensity = cloudKeyPoses3D->points[pointSearchInd[0]].intensity;
-    }
-
-    // also extract some latest key frames in case the robot rotates in one position
-    int numPoses = cloudKeyPoses3D->size();
-    for (int i = numPoses-1; i >= 0; --i)
-    {
-        if (timeLaserInfoCur - cloudKeyPoses6D->points[i].time < 10.0)
-            surroundingKeyPosesDS->push_back(cloudKeyPoses3D->points[i]);
-        else
-            break;
-    }
-
-    // 이후 extractCloud 함수 내용과 유사하게 변환
-    laserCloudSurfFromMap->clear(); 
-    for (int i = 0; i < (int)surroundingKeyPosesDS->size(); ++i)
-    {
-        int thisKeyInd = (int)surroundingKeyPosesDS->points[i].intensity;
-        if (laserCloudMapContainer.find(thisKeyInd) != laserCloudMapContainer.end()) 
-        {
-            // transformed cloud available
-            *laserCloudSurfFromMap += laserCloudMapContainer[thisKeyInd].second;
-        } 
-        else 
-        {
-            // transformed cloud not available
-            pcl::PointCloud<PointType> laserCloudCornerTemp;
-            pcl::PointCloud<PointType> laserCloudSurfTemp = *transformPointCloud(surfCloudKeyFrames[thisKeyInd], &cloudKeyPoses6D->points[thisKeyInd]);
-            *laserCloudSurfFromMap += laserCloudSurfTemp;
-            laserCloudMapContainer[thisKeyInd] = make_pair(laserCloudCornerTemp, laserCloudSurfTemp);
-        }
-    }
-
-    // 다운샘플링으로 포인트 클라우드 크기 줄이기
-    downSizeFilterLocalMapSurf.setInputCloud(laserCloudSurfFromMap);
-    downSizeFilterLocalMapSurf.filter(*laserCloudSurfFromMapDS);
-    laserCloudSurfFromMapDSNum = laserCloudSurfFromMapDS->size();
-}
-
-void mapOptimization::downsampleCurrentScan()
-{
-    laserCloudSurfLastDS->clear();
-    downSizeFilterSurf.setInputCloud(laserCloudSurfLast);
-    downSizeFilterSurf.filter(*laserCloudSurfLastDS);
-    laserCloudSurfLastDSNum = laserCloudSurfLastDS->size();
 }
 
 void mapOptimization::updatePointAssociateToMap()
@@ -1497,4 +1768,209 @@ bool mapOptimization::LMOptimization(int iterCount)
     return false; // keep optimizing
 }
 
+void mapOptimization::initializeDatabase()
+{
+    // 데이터베이스 객체 생성
+    map_database_ = std::make_unique<MapDatabase>(this, db_path_, cloud_storage_path_);
+    
+    // 데이터베이스 초기화
+    if (!map_database_->initialize()) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to initialize map database. Using in-memory mode only.");
+        return;
+    }
+    
+    // 기존 포즈 데이터 로드
+    std::vector<PointTypePose> poses;
+    int loaded_poses = map_database_->loadAllKeyframePoses(poses);
+    
+    if (loaded_poses > 0) {
+        RCLCPP_INFO(this->get_logger(), "Loaded %d keyframe poses from database", loaded_poses);
+        
+        // 최근 일부 키프레임만 메모리에 로드
+        int poses_to_load = std::min(loaded_poses, max_keyframes_in_memory_);
+        std::vector<int> recent_ids;
+        map_database_->getRecentKeyframeIds(poses_to_load, recent_ids);
+        
+        for (int id : recent_ids) {
+            PointTypePose pose;
+            pcl::PointCloud<PointType>::Ptr cloud(new pcl::PointCloud<PointType>());
+            
+            if (map_database_->loadKeyframe(id, pose, cloud)) {
+                // 키프레임 데이터 메모리에 추가
+                cloudKeyPoses3D->push_back(PointType{pose.x, pose.y, pose.z, pose.intensity});
+                cloudKeyPoses6D->push_back(pose);
+                surfCloudKeyFrames.push_back(cloud);
+                last_saved_keyframe_id_ = id;
+            }
+        }
+        
+        // 경로 업데이트
+        for (const auto& pose : poses) {
+            updatePath(pose);
+        }
+    }
+}
+
+// saveKeyframeToDisk 함수는 제거되고 대신 MapDatabase::saveKeyframe 사용
+
+bool mapOptimization::loadKeyframeFromDB(int keyframe_id, PointTypePose& pose, pcl::PointCloud<PointType>::Ptr& cloud)
+{
+    if (!map_database_) {
+        return false;
+    }
+    
+    return map_database_->loadKeyframe(keyframe_id, pose, cloud);
+}
+
+// 마지막 loadSurroundingKeyframesFromDB 함수 정의 사용
+
+void mapOptimization::loadSurroundingKeyframesFromDB()
+{
+    if (!map_database_ || cloudKeyPoses3D->empty()) {
+        return;
+    }
+    
+    // 현재 위치 주변의 키프레임 검색
+    const auto& currentPose = cloudKeyPoses3D->back();
+    std::vector<int> surrounding_ids;
+    
+    int found = map_database_->querySurroundingKeyframes(
+        currentPose.x, 
+        currentPose.y, 
+        currentPose.z, 
+        surroundingKeyframeSearchRadius,
+        surrounding_ids
+    );
+    
+    if (found == 0) {
+        return;
+    }
+    
+    // 메모리에 없는 키프레임 로드
+    for (int id : surrounding_ids) {
+        // 이미 메모리에 있는지 확인
+        bool already_in_memory = false;
+        for (const auto& pose : cloudKeyPoses6D->points) {
+            if (static_cast<int>(pose.intensity) == id) {
+                already_in_memory = true;
+                break;
+            }
+        }
+        
+        // 메모리에 없으면 로드
+        if (!already_in_memory) {
+            PointTypePose pose;
+            pcl::PointCloud<PointType>::Ptr cloud(new pcl::PointCloud<PointType>());
+            
+            if (loadKeyframeFromDisk(id, pose, cloud)) {
+                // laserCloudMapContainer에 추가
+                pcl::PointCloud<PointType> laserCloudCornerTemp;
+                pcl::PointCloud<PointType> laserCloudSurfTemp = *transformPointCloud(cloud, &pose);
+                laserCloudMapContainer[id] = make_pair(laserCloudCornerTemp, laserCloudSurfTemp);
+            }
+        }
+    }
+}
+
 // main 함수는 별도 파일(src/main.cpp)로 분리되었습니다.
+void mapOptimization::initializeMapSaver()
+{
+    // 맵 저장 경로 설정
+    if (!this->has_parameter("map_save_path")) {
+        map_save_path_ = this->declare_parameter<std::string>("map_save_path", "/liorf_ws2/src/liorf/maps");
+    } else {
+        this->get_parameter("map_save_path", map_save_path_);
+    }
+    
+    // 포인트 클라우드 저장 경로 설정
+    if (!this->has_parameter("cloud_storage_path")) {
+        cloud_storage_path_ = this->declare_parameter<std::string>("cloud_storage_path", map_save_path_ + "/clouds");
+    } else {
+        this->get_parameter("cloud_storage_path", cloud_storage_path_);
+    }
+    
+    // 파일 저장 관련 파라미터
+    if (!this->has_parameter("save_keyframe_interval")) {
+        save_interval_ = this->declare_parameter<int>("save_keyframe_interval", 5);
+    } else {
+        this->get_parameter("save_keyframe_interval", save_interval_);
+    }
+    
+    if (!this->has_parameter("max_keyframes_in_memory")) {
+        max_keyframes_in_memory_ = this->declare_parameter<int>("max_keyframes_in_memory", 100);
+    } else {
+        this->get_parameter("max_keyframes_in_memory", max_keyframes_in_memory_);
+    }
+    
+    if (!this->has_parameter("use_keyframe_database")) {
+        use_keyframe_database_ = this->declare_parameter<bool>("use_keyframe_database", true);
+    } else {
+        this->get_parameter("use_keyframe_database", use_keyframe_database_);
+    }
+    
+    // 메모리 관리 모드 설정
+    std::string memory_mode = "sliding_window";
+    if (this->has_parameter("memory_management_mode")) {
+        this->get_parameter("memory_management_mode", memory_mode);
+    } else {
+        this->declare_parameter<std::string>("memory_management_mode", "sliding_window");
+        memory_mode = "sliding_window";
+    }
+    
+    // 맵 초기화 옵션 설정
+    bool clear_map = true;
+    if (this->has_parameter("clear_map_on_start")) {
+        this->get_parameter("clear_map_on_start", clear_map);
+    } else {
+        this->declare_parameter<bool>("clear_map_on_start", true);
+        clear_map = true;
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "메모리 관리 모드: %s, 맵 초기화: %s", 
+               memory_mode.c_str(), clear_map ? "활성화" : "비활성화");
+    
+    // 저장 디렉토리가 없으면 생성
+    rcpputils::fs::path map_path(map_save_path_);
+    rcpputils::fs::path cloud_path(cloud_storage_path_);
+    
+    try {
+        if (!rcpputils::fs::exists(map_path)) {
+            rcpputils::fs::create_directories(map_path);
+        }
+        
+        if (!rcpputils::fs::exists(cloud_path)) {
+            rcpputils::fs::create_directories(cloud_path);
+        }
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "디렉토리 생성 실패: %s", e.what());
+    }
+    
+    // MapDatabase 초기화
+    map_database_ = std::make_unique<MapDatabase>(this, map_save_path_, cloud_storage_path_);
+    
+    if (map_database_->initialize()) {
+        RCLCPP_INFO(this->get_logger(), "[초기화] MapDatabase 초기화 성공: %s (저장 간격: %d, 최대 메모리 키프레임: %d)", 
+                   map_save_path_.c_str(), save_interval_, max_keyframes_in_memory_);
+    } else {
+        RCLCPP_ERROR(this->get_logger(), "[초기화] MapDatabase 초기화 실패");
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "Map Saver initialized with path: %s", map_save_path_.c_str());
+}
+
+bool mapOptimization::loadKeyframeFromDisk(int keyframe_id, PointTypePose& pose, pcl::PointCloud<PointType>::Ptr& cloud)
+{
+    if (!map_database_) {
+        return false;
+    }
+    
+    return map_database_->loadKeyframe(keyframe_id, pose, cloud);
+}
+
+void mapOptimization::downsampleCurrentScan()
+{
+    laserCloudSurfLastDS->clear();
+    downSizeFilterSurf.setInputCloud(laserCloudSurfLast);
+    downSizeFilterSurf.filter(*laserCloudSurfLastDS);
+    laserCloudSurfLastDSNum = laserCloudSurfLastDS->size();
+}

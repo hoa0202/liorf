@@ -1,6 +1,7 @@
 #pragma once
 
 #include "utility.h"
+#include "mapDatabase.h"
 #include "costmap.h" // 코스트맵 생성기 클래스 헤더 추가
 #include "loopclosure.h" // Loop Closure 클래스 헤더 추가
 #include "liorf/msg/cloud_info.hpp"
@@ -28,6 +29,8 @@
 #include "Scancontext.h"
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <numeric> // for std::accumulate
+#include <fstream>
+#include <sstream>
 
 using namespace gtsam;
 
@@ -145,6 +148,18 @@ public:
 
     // Loop Closure 관련 변수
     std::unique_ptr<LoopClosure> loop_closure_; // 루프 클로저 모듈
+    
+    // 맵 데이터베이스 관련 변수
+    std::string map_save_path_; // 맵 저장 경로
+    int save_interval_; // 저장 간격 (키프레임 개수)
+    int last_saved_keyframe_id_; // 마지막으로 저장된 키프레임 ID
+    int max_keyframes_in_memory_; // 메모리에 유지할 최대 키프레임 수
+    bool use_keyframe_database_; // 키프레임 데이터베이스 사용 여부
+    
+    // 데이터베이스 관련 변수
+    std::unique_ptr<MapDatabase> map_database_; // 맵 데이터베이스 객체
+    std::string db_path_; // 데이터베이스 파일 경로
+    std::string cloud_storage_path_; // 포인트 클라우드 저장 디렉토리 경로
 
     mapOptimization(const rclcpp::NodeOptions & options);
 
@@ -185,6 +200,18 @@ public:
     void publishFrames();
     void updateMapSize(const pcl::PointCloud<PointType>::Ptr& cloud);
     void clearOldFrames();
+    
+    // 맵 파일 관리 함수
+    void initializeMapSaver();
+    bool loadKeyframeFromDisk(int keyframe_id, PointTypePose& pose, pcl::PointCloud<PointType>::Ptr& cloud);
+    void pruneMemoryKeyframes();
+    void saveKeyframePoses();
+    void loadKeyframePoses();
+    
+    // 데이터베이스 관련 함수
+    void initializeDatabase();
+    bool loadKeyframeFromDB(int keyframe_id, PointTypePose& pose, pcl::PointCloud<PointType>::Ptr& cloud);
+    void loadSurroundingKeyframesFromDB();
 };
 
 int main(int argc, char** argv); 

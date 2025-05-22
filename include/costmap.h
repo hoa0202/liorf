@@ -110,6 +110,9 @@ public:
     pcl::PointCloud<PointType>::Ptr transformPointCloud(pcl::PointCloud<PointType>::Ptr cloudIn, 
                                                        const PointTypePose* transformIn);
 
+    // 로봇 위치 마커 추가
+    void addRobotMarker(std::unique_ptr<nav_msgs::msg::OccupancyGrid>& grid_msg);
+
 private:
     // 코스트맵 스레드 함수
     void costmapThreadFunc();
@@ -124,9 +127,6 @@ private:
     void projectPointsToGrid(const pcl::PointCloud<PointType>::Ptr& cloud,
                             std::vector<std::vector<std::vector<float>>>& grid_points,
                             std::vector<std::vector<bool>>& cells);
-
-    // 로봇 위치 마커 추가 (그리드 맵에 로봇 위치 표시)
-    void addRobotMarker(nav_msgs::msg::OccupancyGrid::UniquePtr& grid_msg);
 
     // 노드 포인터 (로깅용)
     rclcpp::Node* node_;

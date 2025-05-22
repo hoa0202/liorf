@@ -181,9 +181,10 @@ void CostmapGenerator::updateMapSize(const pcl::PointCloud<PointType>::Ptr& clou
                 costmap_width_ = new_width;
                 costmap_height_ = new_height;
                 
-                RCLCPP_INFO(node_->get_logger(), "Map size updated: width=%.2fm (cells=%d), height=%.2fm (cells=%d), origin=(%.2f, %.2f)",
-                           costmap_width_, costmap_width_cells_, costmap_height_, costmap_height_cells_,
-                           costmap_origin_x_, costmap_origin_y_);
+                // 가독성 있는 로그 포맷으로 출력
+                RCLCPP_INFO(node_->get_logger(), 
+                           "│ 맵 크기 확장: %5.1fm x %4.1fm | 그리드: %4d x %3d   │",
+                           costmap_width_, costmap_height_, costmap_width_cells_, costmap_height_cells_);
                 
                 need_update = true;
             }
@@ -277,63 +278,42 @@ void CostmapGenerator::projectPointsToGrid(const pcl::PointCloud<PointType>::Ptr
     }
 }
 
-void CostmapGenerator::addRobotMarker(nav_msgs::msg::OccupancyGrid::UniquePtr& grid_msg)
+void CostmapGenerator::addRobotMarker(std::unique_ptr<nav_msgs::msg::OccupancyGrid>& grid_msg)
 {
-    // 로봇 위치를 표시 (맵 중앙)
-    // 로봇은 중앙 좌표인 (0,0)에 있다고 가정
-    float robot_x = 0.0;
-    float robot_y = 0.0;
-
-    // 로봇 좌표를 그리드 인덱스로 변환
-    int robot_grid_x = static_cast<int>((robot_x - costmap_origin_x_) / costmap_resolution_);
-    int robot_grid_y = static_cast<int>((robot_y - costmap_origin_y_) / costmap_resolution_);
+    // 로봇 위치는 항상 중앙 (0, 0)
+    double robot_x = 0.0;
+    double robot_y = 0.0;
     
-    // 로봇 주변에 마커 표시 (중심에 있는지 확인용)
-    if (robot_grid_x >= 0 && robot_grid_x < costmap_width_cells_ && 
-        robot_grid_y >= 0 && robot_grid_y < costmap_height_cells_)
-    {
-        int idx = robot_grid_y * grid_msg->info.width + robot_grid_x;
+    // 맵 좌표계에서 로봇의 위치를 그리드 좌표로 변환
+    int grid_x = static_cast<int>((robot_x - costmap_origin_x_) / costmap_resolution_);
+    int grid_y = static_cast<int>((robot_y - costmap_origin_y_) / costmap_resolution_);
+    
+    // 그리드 범위 확인
+    if (grid_x >= 0 && grid_x < static_cast<int>(grid_msg->info.width) &&
+        grid_y >= 0 && grid_y < static_cast<int>(grid_msg->info.height)) {
         
-        if (idx >= 0 && idx < static_cast<int>(grid_msg->data.size())) {
-            grid_msg->data[idx] = 100; // 로봇 위치에 장애물 표시
-            
-            // 로봇 주변 십자가 표시 (더 크게)
-            for (int offset = 1; offset <= 3; offset++) {
-                // 우측
-                if (robot_grid_x + offset < costmap_width_cells_) {
-                    int cross_idx = robot_grid_y * grid_msg->info.width + (robot_grid_x + offset);
-                    if (cross_idx >= 0 && cross_idx < static_cast<int>(grid_msg->data.size())) {
-                        grid_msg->data[cross_idx] = 100;
-                    }
-                }
-                // 좌측
-                if (robot_grid_x - offset >= 0) {
-                    int cross_idx = robot_grid_y * grid_msg->info.width + (robot_grid_x - offset);
-                    if (cross_idx >= 0 && cross_idx < static_cast<int>(grid_msg->data.size())) {
-                        grid_msg->data[cross_idx] = 100;
-                    }
-                }
-                // 상단
-                if (robot_grid_y + offset < costmap_height_cells_) {
-                    int cross_idx = (robot_grid_y + offset) * grid_msg->info.width + robot_grid_x;
-                    if (cross_idx >= 0 && cross_idx < static_cast<int>(grid_msg->data.size())) {
-                        grid_msg->data[cross_idx] = 100;
-                    }
-                }
-                // 하단
-                if (robot_grid_y - offset >= 0) {
-                    int cross_idx = (robot_grid_y - offset) * grid_msg->info.width + robot_grid_x;
-                    if (cross_idx >= 0 && cross_idx < static_cast<int>(grid_msg->data.size())) {
-                        grid_msg->data[cross_idx] = 100;
-                    }
+        // 로봇 위치에 25(중간 회색) 표시
+        int index = grid_y * grid_msg->info.width + grid_x;
+        grid_msg->data[index] = 25;
+        
+        // 주변 3x3 영역을 밝은 회색(25)으로 표시
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                int nx = grid_x + x;
+                int ny = grid_y + y;
+                
+                if (nx >= 0 && nx < static_cast<int>(grid_msg->info.width) &&
+                    ny >= 0 && ny < static_cast<int>(grid_msg->info.height)) {
+                    int idx = ny * grid_msg->info.width + nx;
+                    grid_msg->data[idx] = 25;  // 밝은 회색 (로봇 위치 표시)
                 }
             }
         }
         
-        RCLCPP_INFO(node_->get_logger(), "Added robot marker at grid coords: (%d, %d), world: (%.2f, %.2f)",
-                  robot_grid_x, robot_grid_y, robot_x, robot_y);
-    } else {
-        RCLCPP_WARN(node_->get_logger(), "Robot position (%.2f, %.2f) is outside map bounds!", robot_x, robot_y);
+        // 로그는 코스트맵 표와 일관성 있게 유지
+        RCLCPP_INFO(node_->get_logger(), 
+                   "│ 로봇 위치: 그리드(%3d, %3d) | 월드(%.2f, %.2f)       │", 
+                   grid_x, grid_y, robot_x, robot_y);
     }
 }
 
@@ -452,8 +432,12 @@ nav_msgs::msg::OccupancyGrid::UniquePtr CostmapGenerator::generateCostmap(
         }
     }
     
-    RCLCPP_INFO(node_->get_logger(), "Costmap cells - Low: %d, Mid: %d, High: %d, Total grid: %dx%d (%.1fx%.1fm)", 
-               low_cells_count, mid_cells_count, high_cells_count,
+    // 코스트맵 셀 정보를 표 형식으로 출력
+    RCLCPP_INFO(node_->get_logger(), 
+               "│ 코스트맵 셀 - 낮음: %4d | 중간: %4d | 높음: %4d     │", 
+               low_cells_count, mid_cells_count, high_cells_count);
+    RCLCPP_INFO(node_->get_logger(), 
+               "│ 그리드 크기: %4dx%3d (%5.1fm x %4.1fm)              │", 
                width_cells, height_cells, costmap_width_, costmap_height_);
     
     // 로봇 위치 마커 추가
@@ -583,9 +567,14 @@ void CostmapGenerator::costmapThreadFunc()
     pcl::VoxelGrid<PointType> downSizeFilterMap;
     downSizeFilterMap.setLeafSize(0.2, 0.2, 0.2); // 20cm 해상도로 필터링 (성능 향상)
     
+    // 로그 출력 제한을 위한 카운터 (5회마다 출력)
+    int log_counter = 0;
+    
     while (running_ && rclcpp::ok())
     {
         rate.sleep();
+        log_counter++;
+        bool should_log_verbose = (log_counter % 5 == 0);
         
         pcl::PointCloud<PointType>::Ptr merged_cloud(new pcl::PointCloud<PointType>());
         std::vector<PointTypePose> keyPoses6D;
@@ -635,8 +624,14 @@ void CostmapGenerator::costmapThreadFunc()
             *merged_cloud += *transformed_cloud;
         }
         
-        RCLCPP_INFO(node_->get_logger(), "Costmap update: using %d/%ld frames, step=%d", 
-                std::min(max_samples, static_cast<int>(frameCount)), frameCount, step);
+        // 로그 출력 빈도 제한 (5회마다)
+        if (should_log_verbose) {
+            RCLCPP_INFO(node_->get_logger(), 
+                       "┌─────────────────── 코스트맵 업데이트 정보 ────────────────┐");
+            RCLCPP_INFO(node_->get_logger(), 
+                       "│ 키프레임: %3ld개 | 사용: %3d개 | 스텝: %2d                │", 
+                       frameCount, std::min(max_samples, static_cast<int>(frameCount)), step);
+        }
         
         // 포인트가 부족하면 반환
         if (merged_cloud->points.empty())
@@ -647,11 +642,20 @@ void CostmapGenerator::costmapThreadFunc()
         downSizeFilterMap.setInputCloud(merged_cloud);
         downSizeFilterMap.filter(*filtered_cloud);
         
-        RCLCPP_INFO(node_->get_logger(), "Costmap cloud size: %ld points (after filtering: %ld points)",
-               merged_cloud->points.size(), filtered_cloud->points.size());
+        if (should_log_verbose) {
+            RCLCPP_INFO(node_->get_logger(), 
+                       "│ 포인트: %6ld개 | 필터링 후: %6ld개                    │", 
+                       merged_cloud->points.size(), filtered_cloud->points.size());
+        }
         
         // 코스트맵 생성기를 통해 OccupancyGrid 생성 
         auto costmap = generateCostmap(filtered_cloud);
+        
+        // 로그 출력 완료 (5회마다)
+        if (should_log_verbose) {
+            RCLCPP_INFO(node_->get_logger(), 
+                       "└───────────────────────────────────────────────────────┘");
+        }
         
         // 생성된 코스트맵 발행
         costmap_pub_->publish(std::move(costmap));

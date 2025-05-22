@@ -1,496 +1,272 @@
-#include "liorf/include/loopclosure.h"
-#include "liorf/include/utility.h"
+#include "loopclosure.h"
+#include "utility.h"
 
-LoopClosure::LoopClosure(rclcpp::Node* node, 
+LoopClosure::LoopClosure(rclcpp::Node* node,
                         double historyKeyframeSearchRadius,
                         int historyKeyframeSearchNum,
                         double historyKeyframeSearchTimeDiff,
-                        double historyKeyframeFitnessScore) 
+                        double historyKeyframeFitnessScore)
     : node_(node),
-    aLoopIsClosed(false),
-    isRunning(false),
-    isThreadRunning(true),
-    historyKeyframeSearchRadius(historyKeyframeSearchRadius),
-    historyKeyframeSearchNum(historyKeyframeSearchNum),
-    historyKeyframeSearchTimeDiff(historyKeyframeSearchTimeDiff),
-    historyKeyframeFitnessScore(historyKeyframeFitnessScore)
+      historyKeyframeSearchRadius(historyKeyframeSearchRadius),
+      historyKeyframeSearchNum(historyKeyframeSearchNum),
+      historyKeyframeSearchTimeDiff(historyKeyframeSearchTimeDiff),
+      historyKeyframeFitnessScore(historyKeyframeFitnessScore),
+      isThreadRunning(false)
 {
-    // 파라미터 로깅
-    RCLCPP_INFO(node_->get_logger(), "Loop closure parameters: historyKeyframeSearchRadius=%f, historyKeyframeSearchNum=%d, historyKeyframeSearchTimeDiff=%f, historyKeyframeFitnessScore=%f", 
-        historyKeyframeSearchRadius, historyKeyframeSearchNum, historyKeyframeSearchTimeDiff, historyKeyframeFitnessScore);
-
-    // 포인트 클라우드 초기화
-    cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
-    cloudKeyPoses6D.reset(new pcl::PointCloud<PointTypePose>());
-    kdtreeHistoryKeyPoses.reset(new pcl::KdTreeFLANN<PointType>());
-
-    // ICP 다운샘플링 필터 설정
+    // Scan Context 초기화
+    scManager = std::make_unique<SCManager>();
+    
+    // 루프 큐 초기화
+    loopIndexQueue.clear();
+    loopPoseQueue.clear();
+    loopNoiseQueue.clear();
+    
+    // ICP 설정
+    icpClosed = false;
     downSizeFilterICP.setLeafSize(0.3, 0.3, 0.3);
-
-    // SC 관리자 초기화
-    try {
-        sc_manager_ = std::make_unique<SCManager>();
-        RCLCPP_INFO(node_->get_logger(), "SC Manager initialized successfully");
-    } catch (const std::exception& e) {
-        RCLCPP_ERROR(node_->get_logger(), "Failed to initialize SC Manager: %s", e.what());
-    }
-
-    // 구독/발행자 설정
-    subLoop = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
-        "lio_loop/loop_closure_detection", 
-        rclcpp::QoS(100),
-        std::bind(&LoopClosure::loopInfoHandler, this, std::placeholders::_1));
-
-    pubHistoryKeyFrames = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
-        "liorf/mapping/icp_loop_closure_history_cloud", 
-        rclcpp::QoS(100));
-
-    pubIcpKeyFrames = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
-        "liorf/mapping/icp_loop_closure_corrected_cloud", 
-        rclcpp::QoS(100));
-
-    pubLoopConstraintEdge = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
-        "/liorf/mapping/loop_closure_constraints", 
-        rclcpp::QoS(100));
-
-    RCLCPP_INFO(node_->get_logger(), "Loop closure module initialized");
+    
+    // 루프 클로저 스레드 생성 플래그
+    loopClosureEnabled = node_->declare_parameter<bool>("loop_closure_enabled", true);
+    
+    // 로깅
+    RCLCPP_INFO(node_->get_logger(), "Loop Closure Module Initialized. Enabled: %s", 
+               loopClosureEnabled ? "true" : "false");
 }
 
 LoopClosure::~LoopClosure()
 {
-    isThreadRunning = false;
+    stopThread();
 }
 
-void LoopClosure::loopClosureThread()
+// 스레드 시작
+void LoopClosure::startThread()
 {
-    rclcpp::Rate rate(2);  // 2Hz로 실행
-    
-    while (rclcpp::ok() && isThreadRunning)
-    {
-        rate.sleep();
-        
-        performRSLoopClosure();
-        performSCLoopClosure();
-        visualizeLoopClosure();
-        
-        // Clear loop flag
-        aLoopIsClosed = false;
+    if (!isThreadRunning && loopClosureEnabled) {
+        RCLCPP_INFO(node_->get_logger(), "Starting Loop Closure Thread");
+        isThreadRunning = true;
     }
 }
 
-void LoopClosure::setInputData(pcl::PointCloud<PointType>::Ptr& keyPoses3D, 
-                              pcl::PointCloud<PointTypePose>::Ptr& keyPoses6D,
-                              std::vector<pcl::PointCloud<PointType>::Ptr>& surfKeyFrames,
-                              double currentTimestamp,
-                              pcl::PointCloud<PointType>::Ptr currentScan)
+// 스레드 종료
+void LoopClosure::stopThread()
+{
+    if (isThreadRunning) {
+        RCLCPP_INFO(node_->get_logger(), "Stopping Loop Closure Thread");
+        isThreadRunning = false;
+    }
+}
+
+void LoopClosure::setInputData(const pcl::PointCloud<PointType>::Ptr& keyPoses3D,
+                              const pcl::PointCloud<PointTypePose>::Ptr& keyPoses6D,
+                              const std::vector<pcl::PointCloud<PointType>::Ptr>& surfClouds,
+                              double currentTime,
+                              const pcl::PointCloud<PointType>::Ptr& currentCloudRaw)
 {
     std::lock_guard<std::mutex> lock(mtx);
-
-    // 데이터 복사
-    *cloudKeyPoses3D = *keyPoses3D;
-    *cloudKeyPoses6D = *keyPoses6D;
-    surfCloudKeyFrames = surfKeyFrames;
-    timeLaserInfoCur = currentTimestamp;
     
-    // Scan Context 생성
-    if (sc_manager_ && currentScan) {
-        try {
-            // Scan Context 생성 - SINGLE_SCAN_FULL 방식 사용
-            sc_manager_->makeAndSaveScancontextAndKeys(*currentScan);
-            
-            // 디버그 메시지
-            RCLCPP_DEBUG(node_->get_logger(), "SC Manager processed current scan successfully");
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR(node_->get_logger(), "Error in SC Manager while processing scan: %s", e.what());
+    cloudKeyPoses3D = keyPoses3D;
+    cloudKeyPoses6D = keyPoses6D;
+    surfCloudKeyFrames = surfClouds;
+    timeLaserInfoCur = currentTime;
+    
+    // 새로운 키프레임이 추가되면 Scan Context 생성
+    if (cloudKeyPoses3D->size() > 0 && currentCloudRaw && !currentCloudRaw->empty()) {
+        int currentPoseIdx = cloudKeyPoses3D->size() - 1;
+        
+        // 이미 처리된 데이터인지 확인
+        if (lastProcessedPoseIdx < currentPoseIdx) {
+            // Scan Context 저장
+            scManager->makeAndSaveScancontextAndKeys(*currentCloudRaw);
+            lastProcessedPoseIdx = currentPoseIdx;
         }
     }
 }
 
-void LoopClosure::loopInfoHandler(const std_msgs::msg::Float64MultiArray::SharedPtr loopMsg)
+void LoopClosure::loopClosureThread()
 {
-    std::lock_guard<std::mutex> lock(mtxLoopInfo);
-    if (loopMsg->data.size() != 2)
-        return;
-
-    loopInfoVec.push_back(*loopMsg);
-
-    while (loopInfoVec.size() > 5)
-        loopInfoVec.pop_front();
-}
-
-void LoopClosure::performRSLoopClosure()
-{
-    std::lock_guard<std::mutex> lock(mtx);
+    RCLCPP_INFO(node_->get_logger(), "Loop Closure Thread Started");
     
-    if (cloudKeyPoses3D->points.empty())
-        return;
-
-    // find keys
-    int loopKeyCur;
-    int loopKeyPre;
-    if (detectLoopClosureExternal(&loopKeyCur, &loopKeyPre) == false)
-        if (detectLoopClosureDistance(&loopKeyCur, &loopKeyPre) == false)
-            return;
-
-    // extract cloud
-    pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
-    pcl::PointCloud<PointType>::Ptr prevKeyframeCloud(new pcl::PointCloud<PointType>());
-    {
-        loopFindNearKeyFrames(cureKeyframeCloud, loopKeyCur, 0, -1);
-        loopFindNearKeyFrames(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum, -1);
-        if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000)
-            return;
-        if (pubHistoryKeyFrames->get_subscription_count() != 0)
-            PublishCloudMsg(pubHistoryKeyFrames, *prevKeyframeCloud, node_->now(), "odom");
+    while (rclcpp::ok()) {
+        // 스레드 중지 신호 확인
+        if (!isThreadRunning) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        
+        // 루프 클로저 수행
+        if (cloudKeyPoses3D && cloudKeyPoses6D && !cloudKeyPoses3D->empty()) {
+            performSCLoopClosure();
+            
+            // ICP가 닫혔는지 확인하고 루프 요소 추가
+            if (icpClosed) {
+                icpClosed = false;
+            }
+        }
+        
+        // 스레드 리소스 절약
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-
-    // ICP Settings
-    pcl::IterativeClosestPoint<PointType, PointType> icp;
-    icp.setMaxCorrespondenceDistance(historyKeyframeSearchRadius*2);
-    icp.setMaximumIterations(100);
-    icp.setTransformationEpsilon(1e-6);
-    icp.setEuclideanFitnessEpsilon(1e-6);
-    icp.setRANSACIterations(0);
-
-    // Align clouds
-    icp.setInputSource(cureKeyframeCloud);
-    icp.setInputTarget(prevKeyframeCloud);
-    pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
-    icp.align(*unused_result);
-
-    if (icp.hasConverged() == false || icp.getFitnessScore() > historyKeyframeFitnessScore)
-        return;
-
-    // publish corrected cloud
-    if (pubIcpKeyFrames->get_subscription_count() != 0)
-    {
-        pcl::PointCloud<PointType>::Ptr closed_cloud(new pcl::PointCloud<PointType>());
-        pcl::transformPointCloud(*cureKeyframeCloud, *closed_cloud, icp.getFinalTransformation());
-        PublishCloudMsg(pubIcpKeyFrames, *closed_cloud, node_->now(), "odom");
-    }
-
-    // Get pose transformation
-    float x, y, z, roll, pitch, yaw;
-    Eigen::Affine3f correctionLidarFrame;
-    correctionLidarFrame = icp.getFinalTransformation();
-    // transform from world origin to wrong pose
-    Eigen::Affine3f tWrong = pclPointToAffine3f(cloudKeyPoses6D->points[loopKeyCur]);
-    // transform from world origin to corrected pose
-    Eigen::Affine3f tCorrect = correctionLidarFrame * tWrong;// pre-multiplying -> successive rotation about a fixed frame
-    pcl::getTranslationAndEulerAngles(tCorrect, x, y, z, roll, pitch, yaw);
-    gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
-    gtsam::Pose3 poseTo = pclPointTogtsamPose3(cloudKeyPoses6D->points[loopKeyPre]);
-    gtsam::Vector Vector6(6);
-    float noiseScore = icp.getFitnessScore();
-    Vector6 << noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
-    noiseModel::Diagonal::shared_ptr constraintNoise = noiseModel::Diagonal::Variances(Vector6);
-
-    // Add pose constraint
-    loopIndexQueue.push_back(make_pair(loopKeyCur, loopKeyPre));
-    loopPoseQueue.push_back(poseFrom.between(poseTo));
-    loopNoiseQueue.push_back(constraintNoise);
-
-    // add loop constriant
-    loopIndexContainer[loopKeyCur] = loopKeyPre;
-    
-    // Set flag
-    aLoopIsClosed = true;
 }
 
 void LoopClosure::performSCLoopClosure()
 {
     std::lock_guard<std::mutex> lock(mtx);
     
-    if (cloudKeyPoses3D->points.empty())
+    if (cloudKeyPoses3D->empty() || scManager->polarcontexts_.size() < 10) {
         return;
-
-    // find keys
-    // first: nn index, second: yaw diff 
-    auto detectResult = sc_manager_->detectLoopClosureID(); 
-    int loopKeyCur = cloudKeyPoses3D->size() - 1;
-    int loopKeyPre = detectResult.first;
+    }
+    
+    // 최신 키프레임의 인덱스
+    int latestFrameIDX = cloudKeyPoses3D->size() - 1;
+    
+    // 최신 키프레임의 포즈
+    auto& latestPose = cloudKeyPoses6D->points[latestFrameIDX];
+    
+    // 자기 자신과 매칭되는 것 방지를 위한 시간 차이 확인
+    if (timeLaserInfoCur - latestPose.time < historyKeyframeSearchTimeDiff) {
+        return;
+    }
+    
+    // SC Loop 감지
+    SCDetectionResult detectResult = scManager->detectLoopClosureID();
+    int loopKeyCur = detectResult.first;
+    int loopKeyPre = detectResult.second;
     float yawDiffRad = detectResult.second; // v1에서는 사용하지 않음
     
-    if (loopKeyPre == -1)
+    if (loopKeyCur == -1) {
         return;
-
-    auto it = loopIndexContainer.find(loopKeyCur);
-    if (it != loopIndexContainer.end())
-        return;
-
-    // extract cloud
+    }
+    
+    RCLCPP_INFO(node_->get_logger(), "Loop detected between %d and %d", latestFrameIDX, loopKeyPre);
+    
+    // 검출된 루프 위치에서 ICP 정합 수행
     pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
     pcl::PointCloud<PointType>::Ptr prevKeyframeCloud(new pcl::PointCloud<PointType>());
-    {
-        int base_key = 0;
-        loopFindNearKeyFrames(cureKeyframeCloud, loopKeyCur, 0, base_key);
-        loopFindNearKeyFrames(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum, base_key);
-
-        if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000)
-            return;
-        if (pubHistoryKeyFrames->get_subscription_count() != 0)
-            PublishCloudMsg(pubHistoryKeyFrames, *prevKeyframeCloud, node_->now(), "odom");
-    }
-
-    // ICP Settings
+    
+    // 현재 프레임 클라우드
+    *cureKeyframeCloud += *transformPointCloud(surfCloudKeyFrames[latestFrameIDX], &cloudKeyPoses6D->points[latestFrameIDX]);
+    
+    // 루프 대상 프레임 클라우드
+    *prevKeyframeCloud += *transformPointCloud(surfCloudKeyFrames[loopKeyPre], &cloudKeyPoses6D->points[loopKeyPre]);
+    
+    // ICP 정합
     pcl::IterativeClosestPoint<PointType, PointType> icp;
-    icp.setMaxCorrespondenceDistance(historyKeyframeSearchRadius*2);
+    icp.setMaxCorrespondenceDistance(100);
     icp.setMaximumIterations(100);
     icp.setTransformationEpsilon(1e-6);
     icp.setEuclideanFitnessEpsilon(1e-6);
     icp.setRANSACIterations(0);
-
-    // Align clouds
-    icp.setInputSource(cureKeyframeCloud);
-    icp.setInputTarget(prevKeyframeCloud);
+    
+    // 다운샘플링
+    pcl::PointCloud<PointType>::Ptr cureKeyframeDS(new pcl::PointCloud<PointType>());
+    pcl::PointCloud<PointType>::Ptr prevKeyframeDS(new pcl::PointCloud<PointType>());
+    
+    downSizeFilterICP.setInputCloud(cureKeyframeCloud);
+    downSizeFilterICP.filter(*cureKeyframeDS);
+    
+    downSizeFilterICP.setInputCloud(prevKeyframeCloud);
+    downSizeFilterICP.filter(*prevKeyframeDS);
+    
+    // ICP 설정 및 정합
+    icp.setInputSource(cureKeyframeDS);
+    icp.setInputTarget(prevKeyframeDS);
     pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
     icp.align(*unused_result);
-
-    if (icp.hasConverged() == false || icp.getFitnessScore() > historyKeyframeFitnessScore)
-        return;
-
-    // publish corrected cloud
-    if (pubIcpKeyFrames->get_subscription_count() != 0)
-    {
-        pcl::PointCloud<PointType>::Ptr closed_cloud(new pcl::PointCloud<PointType>());
-        pcl::transformPointCloud(*cureKeyframeCloud, *closed_cloud, icp.getFinalTransformation());
-        PublishCloudMsg(pubIcpKeyFrames, *closed_cloud, node_->now(), "odom");
-    }
-
-    // Get pose transformation
-    float x, y, z, roll, pitch, yaw;
-    Eigen::Affine3f correctionLidarFrame;
-    correctionLidarFrame = icp.getFinalTransformation();
-
-    // giseop 
-    pcl::getTranslationAndEulerAngles(correctionLidarFrame, x, y, z, roll, pitch, yaw);
-    gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
-    gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
-
-    // giseop, robust kernel for a SC loop
-    float robustNoiseScore = 0.5; // constant is ok...
-    gtsam::Vector robustNoiseVector6(6); 
-    robustNoiseVector6 << robustNoiseScore, robustNoiseScore, robustNoiseScore, robustNoiseScore, robustNoiseScore, robustNoiseScore;
-    noiseModel::Base::shared_ptr robustConstraintNoise; 
-    robustConstraintNoise = gtsam::noiseModel::Robust::Create(
-        gtsam::noiseModel::mEstimator::Cauchy::Create(1), // optional: replacing Cauchy by DCS or GemanMcClure, but with a good front-end loop detector, Cauchy is empirically enough.
-        gtsam::noiseModel::Diagonal::Variances(robustNoiseVector6)
-    ); // - checked it works. but with robust kernel, map modification may be delayed (i.e,. requires more true-positive loop factors)
-
-    // Add pose constraint
-    loopIndexQueue.push_back(make_pair(loopKeyCur, loopKeyPre));
-    loopPoseQueue.push_back(poseFrom.between(poseTo));
-    loopNoiseQueue.push_back(robustConstraintNoise);
-
-    // add loop constriant
-    loopIndexContainer[loopKeyCur] = loopKeyPre;
     
-    // Set flag
-    aLoopIsClosed = true;
-}
-
-bool LoopClosure::detectLoopClosureDistance(int *latestID, int *closestID)
-{
-    int loopKeyCur = cloudKeyPoses3D->size() - 1;
-    int loopKeyPre = -1;
-
-    // check loop constraint added before
-    auto it = loopIndexContainer.find(loopKeyCur);
-    if (it != loopIndexContainer.end())
-        return false;
-
-    // find the closest history key frame
-    std::vector<int> pointSearchIndLoop;
-    std::vector<float> pointSearchSqDisLoop;
-    kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
-    kdtreeHistoryKeyPoses->radiusSearch(cloudKeyPoses3D->back(), historyKeyframeSearchRadius, pointSearchIndLoop, pointSearchSqDisLoop, 0);
-    
-    for (int i = 0; i < (int)pointSearchIndLoop.size(); ++i)
-    {
-        int id = pointSearchIndLoop[i];
-        if (abs(cloudKeyPoses6D->points[id].time - timeLaserInfoCur) > historyKeyframeSearchTimeDiff)
-        {
-            loopKeyPre = id;
-            break;
-        }
-    }
-
-    if (loopKeyPre == -1 || loopKeyCur == loopKeyPre)
-        return false;
-
-    *latestID = loopKeyCur;
-    *closestID = loopKeyPre;
-
-    return true;
-}
-
-bool LoopClosure::detectLoopClosureExternal(int *latestID, int *closestID)
-{
-    // this function is not used yet, please ignore it
-    int loopKeyCur = -1;
-    int loopKeyPre = -1;
-
-    std::lock_guard<std::mutex> lock(mtxLoopInfo);
-    if (loopInfoVec.empty())
-        return false;
-
-    double loopTimeCur = loopInfoVec.front().data[0];
-    double loopTimePre = loopInfoVec.front().data[1];
-    loopInfoVec.pop_front();
-
-    if (abs(loopTimeCur - loopTimePre) < historyKeyframeSearchTimeDiff)
-        return false;
-
-    int cloudSize = cloudKeyPoses6D->size();
-    if (cloudSize < 2)
-        return false;
-
-    // latest key
-    loopKeyCur = cloudSize - 1;
-    for (int i = cloudSize - 1; i >= 0; --i)
-    {
-        if (cloudKeyPoses6D->points[i].time >= loopTimeCur)
-            loopKeyCur = round(cloudKeyPoses6D->points[i].intensity);
-        else
-            break;
-    }
-
-    // previous key
-    loopKeyPre = 0;
-    for (int i = 0; i < cloudSize; ++i)
-    {
-        if (cloudKeyPoses6D->points[i].time <= loopTimePre)
-            loopKeyPre = round(cloudKeyPoses6D->points[i].intensity);
-        else
-            break;
-    }
-
-    if (loopKeyCur == loopKeyPre)
-        return false;
-
-    auto it = loopIndexContainer.find(loopKeyCur);
-    if (it != loopIndexContainer.end())
-        return false;
-
-    *latestID = loopKeyCur;
-    *closestID = loopKeyPre;
-
-    return true;
-}
-
-void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKeyframes, const int& key, const int& searchNum, const int& loop_index)
-{
-    // 수정: 외부에서 재사용하기 위해 변환 함수 추가
-    auto transformPointCloud = [this](const pcl::PointCloud<PointType>::Ptr& cloudIn, PointTypePose* transformIn) 
-                              -> pcl::PointCloud<PointType>::Ptr {
-        pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
-
-        Eigen::Affine3f transCur = pcl::getTransformation(
-            transformIn->x, transformIn->y, transformIn->z, 
-            transformIn->roll, transformIn->pitch, transformIn->yaw);
+    // ICP 정합 결과 확인
+    if (icp.hasConverged() && icp.getFitnessScore() < historyKeyframeFitnessScore) {
+        RCLCPP_INFO(node_->get_logger(), "ICP fitness score: %f", icp.getFitnessScore());
         
-        pcl::transformPointCloud(*cloudIn, *cloudOut, transCur);
-        return cloudOut;
-    };
-
-    // extract near keyframes
-    nearKeyframes->clear();
-    int cloudSize = cloudKeyPoses6D->size();
-    for (int i = -searchNum; i <= searchNum; ++i)
-    {
-        int keyNear = key + i;
-        if (keyNear < 0 || keyNear >= cloudSize)
-            continue;
-
-        int select_loop_index = (loop_index != -1) ? loop_index : key + i;
-        pcl::PointCloud<PointType>::Ptr transformed_cloud = transformPointCloud(surfCloudKeyFrames[keyNear], &cloudKeyPoses6D->points[select_loop_index]);
-        *nearKeyframes += *transformed_cloud;
+        // 상대 변환 행렬
+        Eigen::Matrix4f correctionLidarFrame = icp.getFinalTransformation();
+        
+        // 루프 제약 추가
+        Eigen::Affine3f tWrong = pclPointToAffine3f(cloudKeyPoses6D->points[latestFrameIDX]);
+        Eigen::Affine3f tCorrect = pclPointToAffine3f(cloudKeyPoses6D->points[loopKeyPre]);
+        Eigen::Matrix4f poseFinal = tCorrect.matrix() * correctionLidarFrame * tWrong.matrix().inverse();
+        
+        Eigen::Affine3f transFinal(poseFinal);
+        
+        float x, y, z, roll, pitch, yaw;
+        pcl::getTranslationAndEulerAngles(transFinal, x, y, z, roll, pitch, yaw);
+        
+        gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
+        gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
+        
+        // Loop Closure 노이즈 설정
+        gtsam::Vector Vector6(6);
+        Vector6 << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4;
+        gtsam::noiseModel::Diagonal::shared_ptr constraintNoise = noiseModel::Diagonal::Variances(Vector6);
+        
+        // 루프 큐에 추가
+        mtxLoopInfo.lock();
+        loopIndexQueue.push_back(std::make_pair(loopKeyPre, latestFrameIDX));
+        loopPoseQueue.push_back(poseFrom.between(poseTo));
+        loopNoiseQueue.push_back(constraintNoise);
+        mtxLoopInfo.unlock();
+        
+        // 상태 설정
+        icpClosed = true;
+    } else {
+        RCLCPP_WARN(node_->get_logger(), "ICP failed, score: %f > %f", icp.getFitnessScore(), historyKeyframeFitnessScore);
     }
-
-    if (nearKeyframes->empty())
-        return;
-
-    // downsample near keyframes
-    pcl::PointCloud<PointType>::Ptr cloud_temp(new pcl::PointCloud<PointType>());
-    downSizeFilterICP.setInputCloud(nearKeyframes);
-    downSizeFilterICP.filter(*cloud_temp);
-    *nearKeyframes = *cloud_temp;
 }
 
-void LoopClosure::visualizeLoopClosure()
+// 루프 폐쇄 확인
+bool LoopClosure::isLoopClosed()
 {
-    std::lock_guard<std::mutex> lock(mtx);
-    
-    if (loopIndexContainer.empty())
-        return;
-    
-    visualization_msgs::msg::MarkerArray markerArray;
-    // loop nodes
-    visualization_msgs::msg::Marker markerNode;
-    markerNode.header.frame_id = "odom";
-    markerNode.header.stamp = node_->now();
-    markerNode.action = visualization_msgs::msg::Marker::ADD;
-    markerNode.type = visualization_msgs::msg::Marker::SPHERE_LIST;
-    markerNode.ns = "loop_nodes";
-    markerNode.id = 0;
-    markerNode.pose.orientation.w = 1;
-    markerNode.scale.x = 0.3; markerNode.scale.y = 0.3; markerNode.scale.z = 0.3; 
-    markerNode.color.r = 0; markerNode.color.g = 0.8; markerNode.color.b = 1;
-    markerNode.color.a = 1;
-    // loop edges
-    visualization_msgs::msg::Marker markerEdge;
-    markerEdge.header.frame_id = "odom";
-    markerEdge.header.stamp = node_->now();
-    markerEdge.action = visualization_msgs::msg::Marker::ADD;
-    markerEdge.type = visualization_msgs::msg::Marker::LINE_LIST;
-    markerEdge.ns = "loop_edges";
-    markerEdge.id = 1;
-    markerEdge.pose.orientation.w = 1;
-    markerEdge.scale.x = 0.1;
-    markerEdge.color.r = 0.9; markerEdge.color.g = 0.9; markerEdge.color.b = 0;
-    markerEdge.color.a = 1;
-
-    for (auto it = loopIndexContainer.begin(); it != loopIndexContainer.end(); ++it)
-    {
-        int key_cur = it->first;
-        int key_pre = it->second;
-        geometry_msgs::msg::Point p;
-        p.x = cloudKeyPoses6D->points[key_cur].x;
-        p.y = cloudKeyPoses6D->points[key_cur].y;
-        p.z = cloudKeyPoses6D->points[key_cur].z;
-        markerNode.points.push_back(p);
-        markerEdge.points.push_back(p);
-        p.x = cloudKeyPoses6D->points[key_pre].x;
-        p.y = cloudKeyPoses6D->points[key_pre].y;
-        p.z = cloudKeyPoses6D->points[key_pre].z;
-        markerNode.points.push_back(p);
-        markerEdge.points.push_back(p);
-    }
-
-    markerArray.markers.push_back(markerNode);
-    markerArray.markers.push_back(markerEdge);
-    pubLoopConstraintEdge->publish(markerArray);
+    std::lock_guard<std::mutex> lock(mtxLoopInfo);
+    return !loopIndexQueue.empty();
 }
 
+// 루프 큐 반환
+const std::vector<std::pair<int, int>>& LoopClosure::getLoopIndexQueue() const
+{
+    return loopIndexQueue;
+}
+
+const std::vector<gtsam::Pose3>& LoopClosure::getLoopPoseQueue() const
+{
+    return loopPoseQueue;
+}
+
+const std::vector<gtsam::noiseModel::Diagonal::shared_ptr>& LoopClosure::getLoopNoiseQueue() const
+{
+    return loopNoiseQueue;
+}
+
+// 루프 큐 지우기
+void LoopClosure::clearLoopQueue()
+{
+    std::lock_guard<std::mutex> lock(mtxLoopInfo);
+    loopIndexQueue.clear();
+    loopPoseQueue.clear();
+    loopNoiseQueue.clear();
+}
+
+// 좌표 변환 함수
 Eigen::Affine3f LoopClosure::pclPointToAffine3f(PointTypePose thisPoint)
-{
+{ 
     return pcl::getTransformation(thisPoint.x, thisPoint.y, thisPoint.z, thisPoint.roll, thisPoint.pitch, thisPoint.yaw);
 }
 
-gtsam::Pose3 LoopClosure::pclPointTogtsamPose3(PointTypePose thisPoint)
+pcl::PointCloud<PointType>::Ptr LoopClosure::transformPointCloud(pcl::PointCloud<PointType>::Ptr cloudIn, PointTypePose* transformIn)
 {
-    return gtsam::Pose3(gtsam::Rot3::RzRyRx(double(thisPoint.roll), double(thisPoint.pitch), double(thisPoint.yaw)),
-                        gtsam::Point3(double(thisPoint.x), double(thisPoint.y), double(thisPoint.z)));
-}
+    pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
 
-void PublishCloudMsg(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr& publisher,
-                    const pcl::PointCloud<PointType>& cloud,
-                    const rclcpp::Time& stamp,
-                    const std::string& frame_id)
-{
-    sensor_msgs::msg::PointCloud2 cloud_msg;
-    pcl::toROSMsg(cloud, cloud_msg);
-    cloud_msg.header.stamp = stamp;
-    cloud_msg.header.frame_id = frame_id;
-    publisher->publish(cloud_msg);
+    int cloudSize = cloudIn->size();
+    cloudOut->resize(cloudSize);
+
+    Eigen::Affine3f transCur = pcl::getTransformation(transformIn->x, transformIn->y, transformIn->z, transformIn->roll, transformIn->pitch, transformIn->yaw);
+    
+    #pragma omp parallel for num_threads(4)
+    for (int i = 0; i < cloudSize; ++i)
+    {
+        const auto &pointFrom = cloudIn->points[i];
+        cloudOut->points[i].x = transCur(0,0) * pointFrom.x + transCur(0,1) * pointFrom.y + transCur(0,2) * pointFrom.z + transCur(0,3);
+        cloudOut->points[i].y = transCur(1,0) * pointFrom.x + transCur(1,1) * pointFrom.y + transCur(1,2) * pointFrom.z + transCur(1,3);
+        cloudOut->points[i].z = transCur(2,0) * pointFrom.x + transCur(2,1) * pointFrom.y + transCur(2,2) * pointFrom.z + transCur(2,3);
+        cloudOut->points[i].intensity = pointFrom.intensity;
+    }
+    return cloudOut;
 } 

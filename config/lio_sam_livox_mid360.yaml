@@ -31,7 +31,16 @@
     
     # Export settings
     savePCD: true                             # https://github.com/TixiaoShan/LIO-SAM/issues/3
-    savePCDDirectory: "/liorf-ros2/src/liorf/PCD/GlobalMap.pcd"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation
+    savePCDDirectory: "/root/liorf_ws2/src/liorf/maps/PCD"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation
+
+    # Map Database Settings
+    map_save_path: "/root/liorf_ws2/src/liorf/maps"                # 맵 데이터베이스 기본 저장 경로
+    cloud_storage_path: "/root/liorf_ws2/src/liorf/maps/clouds"    # 포인트 클라우드 저장 경로
+    use_keyframe_database: true                               # 키프레임 데이터베이스 사용 여부
+    save_keyframe_interval: 1                                 # 키프레임 저장 간격
+    max_keyframes_in_memory: 100                              # 메모리에 유지할 최대 키프레임 수
+    clear_map_on_start: true                                  # 시작 시 기존 맵 데이터 초기화 여부
+    memory_management_mode: "batch_clear"                     # 메모리 관리 모드: "sliding_window" 또는 "batch_clear"
 
     # Sensor Settings
     sensor: livox                            # lidar sensor type, 'velodyne' or 'ouster' or 'livox' or 'robosense'
