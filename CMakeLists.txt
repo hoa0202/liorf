@@ -105,25 +105,30 @@ add_executable(${PROJECT_NAME}_imageProjection src/imageProjection.cpp ${common_
 ament_target_dependencies(${PROJECT_NAME}_imageProjection ${ros2_lib})
 target_link_libraries(${PROJECT_NAME}_imageProjection "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
 
-# # Mapping Optimization
-add_executable(${PROJECT_NAME}_mapOptmization 
+# Mapping Optimization Library
+add_library(${PROJECT_NAME}_mapOptmization_lib 
   src/mapOptmization.cpp 
   src/costmap.cpp 
   src/loopclosure.cpp
   ${common_lib} 
   include/Scancontext.cpp
 )
-target_compile_options(${PROJECT_NAME}_mapOptmization PRIVATE ${OpenMP_CXX_FLAGS})
+target_compile_options(${PROJECT_NAME}_mapOptmization_lib PRIVATE ${OpenMP_CXX_FLAGS})
 if(USE_PCH)
-  target_precompile_headers(${PROJECT_NAME}_mapOptmization PRIVATE 
+  target_precompile_headers(${PROJECT_NAME}_mapOptmization_lib PRIVATE 
     <pcl/point_cloud.h>
     <pcl/point_types.h>
     <gtsam/geometry/Pose3.h>
     <Eigen/Dense>
   )
 endif()
+ament_target_dependencies(${PROJECT_NAME}_mapOptmization_lib ${ros2_lib})
+target_link_libraries(${PROJECT_NAME}_mapOptmization_lib Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam)
+
+# Mapping Optimization Executable
+add_executable(${PROJECT_NAME}_mapOptmization src/main.cpp)
+target_link_libraries(${PROJECT_NAME}_mapOptmization ${PROJECT_NAME}_mapOptmization_lib)
 ament_target_dependencies(${PROJECT_NAME}_mapOptmization ${ros2_lib})
-target_link_libraries(${PROJECT_NAME}_mapOptmization Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam)
 
 # # IMU Preintegration
 add_executable(${PROJECT_NAME}_imuPreintegration src/imuPreintegration.cpp ${common_lib})
@@ -140,6 +145,7 @@ install(
   ${PROJECT_NAME}_imageProjection
   ${PROJECT_NAME}_imuPreintegration
   ${PROJECT_NAME}_mapOptmization
+  ${PROJECT_NAME}_mapOptmization_lib
   DESTINATION lib/${PROJECT_NAME}
 )
 
