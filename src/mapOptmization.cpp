@@ -1,4 +1,4 @@
-#include "liorf/include/utility.h"
+#include "utility.h"
 #include "liorf/msg/cloud_info.hpp"
 #include "liorf/srv/save_map.hpp"
 // <!-- liorf_yjz_lucky_boy -->
@@ -21,20 +21,13 @@
 #include <GeographicLib/Geocentric.hpp>
 #include <GeographicLib/LocalCartesian.hpp>
 
-#include "liorf/include/Scancontext.h"
+#include "Scancontext.h"
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <numeric> // for std::accumulate
-#include "liorf/include/costmap.h" // 코스트맵 생성기 클래스 헤더 추가
-#include "liorf/include/loopclosure.h" // Loop Closure 클래스 헤더 추가
+#include "costmap.h" // 코스트맵 생성기 클래스 헤더 추가
+#include "loopclosure.h" // Loop Closure 클래스 헤더 추가
 
-#include "liorf/include/mapOptimization.h"
-
-// 헤더가 이미 필요한 모든 선언을 포함하므로 중복 선언 제거
-// using namespace gtsam;
-// using symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
-// using symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
-// using symbol_shorthand::B; // Bias  (ax,ay,az,gx,gy,gz)
-// using symbol_shorthand::G; // GPS pose
+#include "mapOptimization.h"
 
 mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamServer("liorf_mapOptimization", options)
     {
