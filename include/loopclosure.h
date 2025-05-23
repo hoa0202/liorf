@@ -1,9 +1,9 @@
 #ifndef LOOPCLOSURE_H
 #define LOOPCLOSURE_H
 
-#include "liorf/include/utility.h"
-#include "liorf/include/Scancontext.h"
-#include "liorf/include/costmap.h"
+#include "utility.h"
+#include "Scancontext.h"
+#include "costmap.h"
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
