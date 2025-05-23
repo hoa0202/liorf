@@ -4,6 +4,7 @@
 #include "utility.h"
 #include "Scancontext.h"
 #include "costmap.h"
+#include "db_manager.h"
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>

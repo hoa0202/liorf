@@ -52,20 +52,6 @@ public:
         tfMap2Odom = std::make_unique<tf2_ros::TransformBroadcaster>(this);
         tfOdom2BaseLink = std::make_unique<tf2_ros::TransformBroadcaster>(this);
 
-        if(lidarFrame != baselinkFrame)
-        {
-            try
-            {
-                tf2::fromMsg(tfBuffer->lookupTransform(
-                    lidarFrame, baselinkFrame, rclcpp::Time(0)), lidar2Baselink);
-            }
-            catch (tf2::TransformException ex)
-            {
-                RCLCPP_ERROR(get_logger(), "%s", ex.what());
-            }
-        }
-
-
         subLaserOdometry = create_subscription<nav_msgs::msg::Odometry>("liorf_localization/mapping/odometry", QosPolicy(history_policy, reliability_policy), 
                     std::bind(&TransformFusion::lidarOdometryHandler, this, std::placeholders::_1));
 
@@ -89,6 +75,7 @@ public:
 
     void lidarOdometryHandler(const nav_msgs::msg::Odometry::SharedPtr odomMsg)
     {
+        // RCLCPP_INFO(this->get_logger(), "[TransformFusion] lidarOdometryHandler called, stamp=%.3f", rclcpp::Time(odomMsg->header.stamp).seconds());
         std::lock_guard<std::mutex> lock(mtx);
 
         lidarOdomAffine = odom2affine(*odomMsg);
@@ -98,6 +85,7 @@ public:
 
     void imuOdometryHandler(const nav_msgs::msg::Odometry::SharedPtr odomMsg)
     {
+        // RCLCPP_INFO(this->get_logger(), "[TransformFusion] imuOdometryHandler called, stamp=%.3f", rclcpp::Time(odomMsg->header.stamp).seconds());
         // static tf
         tf2::Quaternion quat_tf;
         rclcpp::Time t(static_cast<uint32_t>(lidarOdomTime * 1e9));
@@ -145,7 +133,26 @@ public:
                                         laserOdometry.pose.pose.position.z));
 
         if (lidarFrame != baselinkFrame)
-            tCur *= lidar2Baselink;
+        {
+            try
+            {
+                if (lidar2Baselink.stamp_ != tf2::TimePointZero)  // isZero() 대신 TimePointZero 비교
+                {
+                    tCur *= lidar2Baselink;
+                }
+                else  // 없으면 새로 lookup
+                {
+                    tf2::fromMsg(tfBuffer->lookupTransform(
+                        lidarFrame, baselinkFrame, rclcpp::Time(0)), lidar2Baselink);
+                    tCur *= lidar2Baselink;
+                }
+            }
+            catch (const tf2::TransformException& ex)  // const 참조로 변경
+            {
+                // RCLCPP_WARN(get_logger(), "TF lookup 실패: %s", ex.what());
+                return;  // TF lookup 실패시 이번 메시지는 스킵
+            }
+        }
             
         // odom → base_link 변환 생성 및 전송
         tf2::Stamped<tf2::Transform> temp_odom_to_base(tCur, time_point, odometryFrame);
@@ -281,6 +288,7 @@ public:
 
     void odometryHandler(const nav_msgs::msg::Odometry::SharedPtr odomMsg)
     {
+        // RCLCPP_INFO(this->get_logger(), "[imuPreintegration] odometryHandler called, stamp=%.3f", rclcpp::Time(odomMsg->header.stamp).seconds());
         std::lock_guard<std::mutex> lock(mtx);
 
         double currentCorrectionTime = ROS_TIME(odomMsg->header.stamp);
@@ -467,7 +475,7 @@ public:
         Eigen::Vector3f vel(velCur.x(), velCur.y(), velCur.z());
         if (vel.norm() > 10) // Adjusted threshold
         {
-            RCLCPP_WARN(get_logger(), "Large velocity, reset IMU-preintegration!");
+            // RCLCPP_WARN(get_logger(), "Large velocity, reset IMU-preintegration!");
             return true;
         }
 
@@ -475,7 +483,7 @@ public:
         Eigen::Vector3f bg(biasCur.gyroscope().x(), biasCur.gyroscope().y(), biasCur.gyroscope().z());
         if (ba.norm() > 1.0 || bg.norm() > 1.0)
         {
-            RCLCPP_WARN(get_logger(), "Large bias, reset IMU-preintegration!");
+            // RCLCPP_WARN(get_logger(), "Large bias, reset IMU-preintegration!");
             return true;
         }
 
@@ -484,6 +492,7 @@ public:
 
     void imuHandler(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
     {
+        // RCLCPP_INFO(this->get_logger(), "[imuPreintegration] imuHandler called, stamp=%.3f", rclcpp::Time(imu_raw->header.stamp).seconds());
         std::lock_guard<std::mutex> lock(mtx);
 
         sensor_msgs::msg::Imu thisImu = imuConverter(*imu_raw);
@@ -560,7 +569,7 @@ int main(int argc, char** argv)
     e.add_node(ImuP);
     e.add_node(TF);
 
-    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "\033[1;32m----> IMU Preintegration Started.\033[0m");
+    // RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "\033[1;32m----> IMU Preintegration Started.\033[0m");
 
     e.spin();
 

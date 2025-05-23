@@ -3,7 +3,7 @@
 - This version has removed the feature extraction module, making it easier to adapt to different lidars;
   
 - Support 'robosense' lidar and Mulran datasets, make the following changes in "*.yaml":
-  - sensor: “robosense” or sensor: “mulran”
+  - sensor: "robosense" or sensor: "mulran"
 
 - Support 6-axis IMU, make the following changes in "*.yaml":
   - imuType: 0 # 0: 6-axis IMU, 1: 9-axis IMU
@@ -142,3 +142,58 @@ This will generate a BAG package in ROS1 format, You need to convert it to the B
 
 ## Acknowledgments
   Thanks for [LIO-SAM](https://github.com/TixiaoShan/LIO-SAM), [FAST_LIO2](https://github.com/hku-mars/FAST_LIO), [UrbanNavDataset](https://github.com/weisongwen/UrbanNavDataset), [M2DGR](https://github.com/SJTU-ViSYS/M2DGR) and [MulRanDataset](https://sites.google.com/view/mulran-pr/?pli=1).
+
+# LIORF - LiDAR SLAM with Memory Optimization
+
+## SQLite 기반 슬라이딩 윈도우 최적화
+
+본 프로젝트에 메모리 최적화를 위한 SQLite 데이터베이스 기반 슬라이딩 윈도우 방식이 추가되었습니다. 이 방식은 장기간 SLAM 운용 시 메모리 사용량을 효율적으로 관리하면서도 맵 정보의 품질을 유지합니다.
+
+### 주요 기능
+
+- **슬라이딩 윈도우 방식**: 현재 위치 주변의 키프레임만 메모리에 유지하고 나머지는 데이터베이스에 저장
+- **자동 메모리 관리**: 설정된 메모리 제한에 도달하면 오래된 키프레임을 자동으로 언로드
+- **공간 쿼리 최적화**: R-tree 인덱스를 활용한 효율적인 위치 기반 키프레임 검색
+- **일관성 유지**: 트랜잭션을 통한 데이터 일관성 보장
+- **포인트 클라우드 직렬화**: 효율적인 포인트 클라우드 저장 및 로드
+
+### 사용 방법
+
+데이터베이스 모드는 launch 파일 또는 파라미터를 통해 활성화할 수 있습니다:
+
+```bash
+# 런치 파일을 통한 실행
+ros2 launch liorf run_lio_sam_livox_mid360.launch.py
+```
+
+또는 파라미터를 직접 설정:
+
+```bash
+ros2 run liorf liorf_mapOptmization --ros-args -p use_database_mode:=true -p db_path:=/path/to/your_map.db
+```
+
+### 주요 파라미터
+
+- `use_database_mode`: 데이터베이스 모드 활성화 여부 (기본값: false)
+- `db_path`: 데이터베이스 파일 경로 (기본값: "slam_map.db")
+- `active_keyframes_window_size`: 메모리에 유지할 활성 키프레임 수 (기본값: 100)
+- `spatial_query_radius`: 공간 쿼리 반경 (미터, 기본값: 30.0)
+- `memory_check_interval_ms`: 메모리 사용량 확인 주기 (밀리초, 기본값: 5000)
+- `memory_limit_mb`: 메모리 사용 제한 (MB, 기본값: 2000)
+
+### 동작 원리
+
+1. 새 키프레임이 추가될 때마다 데이터베이스에 저장
+2. 현재 위치 주변의 키프레임만 메모리에 로드 (슬라이딩 윈도우)
+3. 루프 클로저 등 필요 시 데이터베이스에서 관련 키프레임 로드
+4. 메모리 사용량이 임계값을 초과하면 오래된 키프레임 해제
+
+### 필요 의존성
+
+- SQLite3: `sudo apt-get install libsqlite3-dev`
+
+### 성능 팁
+
+- 빠른 SSD에 데이터베이스 파일 저장 권장
+- 활성 윈도우 크기를 환경과 하드웨어에 맞게 조절
+- 더 빠른 로딩을 위해 포인트 클라우드 해상도 조절 가능

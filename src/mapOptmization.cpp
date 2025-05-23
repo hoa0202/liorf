@@ -35,6 +35,9 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
         parameters.relinearizeThreshold = 0.1;
         parameters.relinearizeSkip = 1;
         isam = new ISAM2(parameters);
+        
+        // Add priorNoise definition
+        priorNoise = noiseModel::Diagonal::Variances((gtsam::Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished());
 
         subCloud = create_subscription<liorf::msg::CloudInfo>("liorf/deskew/cloud_info", QosPolicy(history_policy, reliability_policy),
                     std::bind(&mapOptimization::laserCloudInfoHandler, this, std::placeholders::_1));
@@ -173,40 +176,89 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
 
             updateInitialGuess();
 
-            // 주변 키프레임 추출 - 함수 복원
-            extractSurroundingKeyFrames();
-
-            // 포인트 클라우드 다운샘플링으로 메모리 사용량 및 계산량 감소
+            // 다운샘플링 먼저 수행 (첫 번째 프레임 처리에 필요)
             downsampleCurrentScan();
 
-            scan2MapOptimization();
+            // cloudKeyPoses3D가 비어있는 경우 키프레임 추가 (첫 번째 프레임에만 해당)
+            if (cloudKeyPoses3D->points.empty()) {
+                // first key pose
+                PointType firstPointPose;
+                firstPointPose.x = transformTobeMapped[3];
+                firstPointPose.y = transformTobeMapped[4];
+                firstPointPose.z = transformTobeMapped[5];
+                firstPointPose.intensity = 0;
+                cloudKeyPoses3D->push_back(firstPointPose);
 
-            saveKeyFramesAndFactor();
+                // first key pose 6D
+                PointTypePose firstPointPose6D;
+                firstPointPose6D.x = transformTobeMapped[3];
+                firstPointPose6D.y = transformTobeMapped[4];
+                firstPointPose6D.z = transformTobeMapped[5];
+                firstPointPose6D.roll = transformTobeMapped[0];
+                firstPointPose6D.pitch = transformTobeMapped[1];
+                firstPointPose6D.yaw = transformTobeMapped[2];
+                firstPointPose6D.time = timeLaserInfoCur;
+                firstPointPose6D.intensity = 0;
+                cloudKeyPoses6D->push_back(firstPointPose6D);
 
-            correctPoses();
+                // save point cloud
+                pcl::PointCloud<PointType>::Ptr firstFrameCloud(new pcl::PointCloud<PointType>());
+                pcl::copyPointCloud(*laserCloudSurfLastDS, *firstFrameCloud);
+                surfCloudKeyFrames.push_back(firstFrameCloud);
+                
+                // save path
+                updatePath(firstPointPose6D);
+                
+                // Initialize prior factor
+                gtSAMgraph.add(PriorFactor<Pose3>(0, 
+                    Pose3(Rot3::RzRyRx(transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]), 
+                          Point3(transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5])), 
+                    priorNoise));
+                initialEstimate.insert(0, 
+                    Pose3(Rot3::RzRyRx(transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]),
+                          Point3(transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5])));
+                isam->update(gtSAMgraph, initialEstimate);
+                gtSAMgraph.resize(0);
+                initialEstimate.clear();
+                
+                RCLCPP_INFO(get_logger(), "Added first key frame - 첫 번째 프레임 추가됨");
+                
+                // 첫 번째 키프레임 추가 후에는 함수 종료
+                return; // 첫 번째 프레임 추가 후 바로 리턴하여 세그멘테이션 폴트 방지
+            }
+            else {
+                // 주변 키프레임 추출 - 함수 복원
+                extractSurroundingKeyFrames();
 
-            // 메모리 관리: 너무 오래된 프레임 제거
-            clearOldFrames();
+                scan2MapOptimization();
 
-            publishOdometry();
+                saveKeyFramesAndFactor();
 
-            publishFrames();
+                correctPoses();
+
+                // 메모리 관리: 너무 오래된 프레임 제거
+                clearOldFrames();
+
+                publishOdometry();
+
+                publishFrames();
+                
+                // 코스트맵 생성기에 데이터 전달
+                if (costmap_generator_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
+                    // PCL의 points 멤버를 std::vector<PointTypePose>로 변환
+                    std::vector<PointTypePose> keyPoses6DVector(cloudKeyPoses6D->points.begin(), cloudKeyPoses6D->points.end());
+                    
+                    // 코스트맵 데이터 업데이트
+                    costmap_generator_->processClouds(cloudKeyPoses3D, surfCloudKeyFrames, keyPoses6DVector);
+                }
+                
+                // Loop Closure 모듈에 데이터 전달
+                if (loop_closure_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
+                    loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur);
+                }
+            }
         }
-    
-    // 코스트맵 생성기에 데이터 전달
-    if (costmap_generator_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
-        // PCL의 points 멤버를 std::vector<PointTypePose>로 변환
-        std::vector<PointTypePose> keyPoses6DVector(cloudKeyPoses6D->points.begin(), cloudKeyPoses6D->points.end());
-        
-        // 코스트맵 데이터 업데이트
-        costmap_generator_->processClouds(cloudKeyPoses3D, surfCloudKeyFrames, keyPoses6DVector);
     }
-    
-    // Loop Closure 모듈에 데이터 전달
-    if (loop_closure_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
-        loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur);
-    }
-}
 
 void mapOptimization::gpsHandler(const sensor_msgs::msg::NavSatFix::SharedPtr gpsMsg)
     {
@@ -456,7 +508,20 @@ void mapOptimization::visualizeGlobalMapThread()
         rclcpp::Rate rate(0.2);
         while (rclcpp::ok()){
             rate.sleep();
-            publishGlobalMap();
+            
+            // 스레드가 실행될 때 cloudKeyPoses3D가 비어있으면 스킵
+            if (cloudKeyPoses3D->points.empty()) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, 
+                                    "visualizeGlobalMapThread: cloudKeyPoses3D is empty, skipping map publication");
+                continue;
+            }
+            
+            // 함수 호출 전에 추가 안전 검사
+            try {
+                publishGlobalMap();
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "Error in publishGlobalMap: %s", e.what());
+            }
         }
 
         if (savePCD == false)
@@ -532,31 +597,48 @@ void mapOptimization::publishGlobalMap()
 
 void mapOptimization::scan2MapOptimization()
 {
-        if (cloudKeyPoses3D->points.empty())
-            return;
+    // RCLCPP_INFO(this->get_logger(), "[mapOptimization] scan2MapOptimization called");
 
-        if (laserCloudSurfLastDSNum > 30)
-        {
-            kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
-
-            for (int iterCount = 0; iterCount < 30; iterCount++)
-            {
-                laserCloudOri->clear();
-                coeffSel->clear();
-
-                surfOptimization();
-
-                combineOptimizationCoeffs();
-
-                if (LMOptimization(iterCount) == true)
-                    break;              
-            }
-
-            transformUpdate();
-        } else {
-            RCLCPP_WARN(get_logger(), "Not enough features! Only %d planar features available.", laserCloudSurfLastDSNum);
-        }
+    // cloudKeyPoses3D가 비어 있는지 확인
+    if (cloudKeyPoses3D->points.empty()) {
+        RCLCPP_WARN(this->get_logger(), "cloudKeyPoses3D is empty, skipping scan2MapOptimization");
+        return;
     }
+    
+    // KdTree 생성 전에 추가 안전 검사
+    if (!laserCloudSurfFromMapDS || laserCloudSurfFromMapDS->empty()) {
+        RCLCPP_WARN(this->get_logger(), "laserCloudSurfFromMapDS is empty, skipping scan2MapOptimization");
+        return;
+    }
+
+    if (laserCloudSurfLastDSNum > 30)
+    {
+        // KdTree 생성 전 추가 안전장치
+        try {
+            kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
+        } catch (const pcl::PCLException& e) {
+            RCLCPP_ERROR(this->get_logger(), "PCL error in kdtreeSurfFromMap: %s", e.what());
+            return;
+        }
+
+        for (int iterCount = 0; iterCount < 30; iterCount++)
+        {
+            laserCloudOri->clear();
+            coeffSel->clear();
+
+            surfOptimization();
+
+            combineOptimizationCoeffs();
+
+            if (LMOptimization(iterCount) == true)
+                break;              
+        }
+
+        transformUpdate();
+    } else {
+        RCLCPP_WARN(get_logger(), "Not enough features! Only %d planar features available.", laserCloudSurfLastDSNum);
+    }
+}
 
 void mapOptimization::transformUpdate()
     {
@@ -1191,8 +1273,11 @@ void mapOptimization::extractCloud(pcl::PointCloud<PointType>::Ptr cloudToExtrac
 
 void mapOptimization::extractSurroundingKeyFrames()
 {
-    if (cloudKeyPoses3D->points.empty())
+    // 비어 있는 경우 리턴 (이미 첫 번째 프레임이 추가되었으므로 여기서는 발생하지 않아야 함)
+    if (cloudKeyPoses3D->points.empty()) {
+        RCLCPP_WARN(this->get_logger(), "cloudKeyPoses3D is empty, skipping keyframe extraction");
         return;
+    }
     
     // 주변 키프레임 추출 결과를 저장할 변수들 초기화
     if (laserCloudSurfFromMap) laserCloudSurfFromMap->clear();

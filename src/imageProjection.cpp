@@ -195,6 +195,7 @@ public:
 
     void imuHandler(const sensor_msgs::msg::Imu::SharedPtr imuMsg)
     {
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] imuHandler called, stamp=%.3f", rclcpp::Time(imuMsg->header.stamp).seconds());
         sensor_msgs::msg::Imu thisImu = imuConverter(*imuMsg);
 
         std::lock_guard<std::mutex> lock1(imuLock);
@@ -220,17 +221,30 @@ public:
 
     void odometryHandler(const nav_msgs::msg::Odometry::SharedPtr odometryMsg)
     {
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] odometryHandler called, stamp=%.3f", rclcpp::Time(odometryMsg->header.stamp).seconds());
         std::lock_guard<std::mutex> lock2(odoLock);
         odomQueue.push_back(*odometryMsg);
     }
 
     void cloudHandler(const sensor_msgs::msg::PointCloud2::SharedPtr laserCloudMsg)
     {
-        if (!cachePointCloud(laserCloudMsg))
-            return;
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] cloudHandler called, stamp=%.3f", rclcpp::Time(laserCloudMsg->header.stamp).seconds());
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] Point cloud size: %d", laserCloudMsg->width * laserCloudMsg->height);
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] Point cloud fields: %d", laserCloudMsg->fields.size());
+        // for (const auto& field : laserCloudMsg->fields) {
+        //     RCLCPP_INFO(this->get_logger(), "[imageProjection] Field: %s, offset: %d, datatype: %d", 
+        //         field.name.c_str(), field.offset, field.datatype);
+        // }
 
-        if (!deskewInfo())
+        if (!cachePointCloud(laserCloudMsg)) {
+            // RCLCPP_WARN(this->get_logger(), "[imageProjection] cachePointCloud returned false");
             return;
+        }
+
+        if (!deskewInfo()) {
+            // RCLCPP_WARN(this->get_logger(), "[imageProjection] deskewInfo returned false");
+            return;
+        }
 
         projectPointCloud();
 
@@ -241,17 +255,23 @@ public:
 
     bool cachePointCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& laserCloudMsg)
     {
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] cachePointCloud called, stamp=%.3f", rclcpp::Time(laserCloudMsg->header.stamp).seconds());
         // cache point cloud
         cloudQueue.push_back(*laserCloudMsg);
-        if (cloudQueue.size() <= 2)
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] cloudQueue size: %d", cloudQueue.size());
+        if (cloudQueue.size() <= 2) {
+            // RCLCPP_WARN(this->get_logger(), "[imageProjection] Not enough clouds in queue");
             return false;
+        }
 
         // convert cloud
         currentCloudMsg = std::move(cloudQueue.front());
         cloudQueue.pop_front();
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] Processing cloud with sensor type: %d", int(sensor));
         if (sensor == SensorType::VELODYNE)
         {
             pcl::moveFromROSMsg(currentCloudMsg, *laserCloudIn);
+            // RCLCPP_INFO(this->get_logger(), "[imageProjection] Converted to Velodyne format, points: %d", laserCloudIn->size());
         }
         else if (sensor == SensorType::OUSTER)
         {
@@ -270,52 +290,18 @@ public:
                 dst.ring = src.ring;
                 dst.time = src.t * 1e-9f;
             }
-        } // <!-- liorf_yjz_lucky_boy -->
-        else if (sensor == SensorType::MULRAN)
-        {
-            // Convert to Velodyne format
-            pcl::moveFromROSMsg(currentCloudMsg, *tmpMulranCloudIn);
-            laserCloudIn->points.resize(tmpMulranCloudIn->size());
-            laserCloudIn->is_dense = tmpMulranCloudIn->is_dense;
-            for (size_t i = 0; i < tmpMulranCloudIn->size(); i++)
-            {
-                auto &src = tmpMulranCloudIn->points[i];
-                auto &dst = laserCloudIn->points[i];
-                dst.x = src.x;
-                dst.y = src.y;
-                dst.z = src.z;
-                dst.intensity = src.intensity;
-                dst.ring = src.ring;
-                dst.time = static_cast<float>(src.t);
-            }
-        } // <!-- liorf_yjz_lucky_boy -->
-        else if (sensor == SensorType::ROBOSENSE) {
-            pcl::PointCloud<RobosensePointXYZIRT>::Ptr tmpRobosenseCloudIn(new pcl::PointCloud<RobosensePointXYZIRT>());
-            // Convert to robosense format
-            pcl::moveFromROSMsg(currentCloudMsg, *tmpRobosenseCloudIn);
-            laserCloudIn->points.resize(tmpRobosenseCloudIn->size());
-            laserCloudIn->is_dense = tmpRobosenseCloudIn->is_dense;
-
-            double start_stamptime = tmpRobosenseCloudIn->points[0].timestamp;
-            for (size_t i = 0; i < tmpRobosenseCloudIn->size(); i++) {
-                auto &src = tmpRobosenseCloudIn->points[i];
-                auto &dst = laserCloudIn->points[i];
-                dst.x = src.x;
-                dst.y = src.y;
-                dst.z = src.z;
-                dst.intensity = src.intensity;
-                dst.ring = src.ring;
-                dst.time = src.timestamp - start_stamptime;
-            }
+            // RCLCPP_INFO(this->get_logger(), "[imageProjection] Converted to Velodyne format from Ouster, points: %d", laserCloudIn->size());
         }
         else if (sensor == SensorType::LIVOX)
         {
             pcl::PointCloud<LivoxPoint>::Ptr cloudIn(new pcl::PointCloud<LivoxPoint>());
             pcl::fromROSMsg(currentCloudMsg, *cloudIn);
+            // RCLCPP_INFO(this->get_logger(), "[imageProjection] Original Livox cloud size: %d", cloudIn->size());
 
             // NaN 포인트 제거
             std::vector<int> indices;
             pcl::removeNaNFromPointCloud(*cloudIn, *cloudIn, indices);
+            // RCLCPP_INFO(this->get_logger(), "[imageProjection] After NaN removal, cloud size: %d", cloudIn->size());
 
             laserCloudIn->points.resize(cloudIn->size());
             laserCloudIn->is_dense = cloudIn->is_dense;
@@ -330,22 +316,26 @@ public:
                 dst.time = src.offset_time * 1e-9f; // 나노초를 초로 변환
                 dst.ring = 0; // Livox는 ring 정보가 없으므로 0으로 설정
             }
+            // RCLCPP_INFO(this->get_logger(), "[imageProjection] Converted to Velodyne format from Livox, points: %d", laserCloudIn->size());
         }
         else {
-            RCLCPP_ERROR_STREAM(get_logger(), "Unknown sensor type: " << int(sensor));
+            // RCLCPP_ERROR_STREAM(get_logger(), "Unknown sensor type: " << int(sensor));
             rclcpp::shutdown();
+            return false;
         }
 
         // get timestamp
         cloudHeader = currentCloudMsg.header;
         timeScanCur = rclcpp::Time(cloudHeader.stamp).seconds();
         timeScanEnd = timeScanCur + laserCloudIn->points.back().time;
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] Scan time range: %.3f to %.3f", timeScanCur, timeScanEnd);
 
         // check dense flag
         if (laserCloudIn->is_dense == false)
         {
-            RCLCPP_ERROR_STREAM(get_logger(), "Point cloud is not in dense format, please remove NaN points first!");
+            // RCLCPP_ERROR_STREAM(get_logger(), "Point cloud is not in dense format, please remove NaN points first!");
             rclcpp::shutdown();
+            return false;
         }
 
         // check ring channel
@@ -365,18 +355,19 @@ public:
             {
                 if (sensor == SensorType::LIVOX)
                 {
-                    RCLCPP_WARN(get_logger(), "Livox LiDAR does not provide ring channel. Using alternative method.");
+                    // RCLCPP_WARN(get_logger(), "Livox LiDAR does not provide ring channel. Using alternative method.");
                     ringFlag = 1;  // Livox의 경우 ring 채널이 없어도 진행
                 }
                 else
                 {
-                    RCLCPP_ERROR_STREAM(get_logger(), "Point cloud ring channel not available, please configure your point cloud data!");
+                    // RCLCPP_ERROR_STREAM(get_logger(), "Point cloud ring channel not available, please configure your point cloud data!");
                     rclcpp::shutdown();
+                    return false;
                 }
             }
         }
 
-            // check point time
+        // check point time
         if (deskewFlag == 0)
         {
             deskewFlag = -1;
@@ -389,7 +380,7 @@ public:
                 }
             }
             if (deskewFlag == -1)
-                RCLCPP_WARN(get_logger(), "Point cloud timestamp not found in standard fields. Checking custom Livox fields.");
+                ; // RCLCPP_WARN(get_logger(), "Point cloud timestamp not found in standard fields. Checking custom Livox fields.");
         }
 
         // Livox 특정 timestamp 처리
@@ -400,24 +391,29 @@ public:
                 if (field.name == "offset_time")
                 {
                     deskewFlag = 1;
-                    RCLCPP_INFO(get_logger(), "Using Livox offset_time for deskewing.");
+                    // RCLCPP_INFO(get_logger(), "Using Livox offset_time for deskewing.");
                     break;
                 }
             }
         }
 
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] cachePointCloud completed successfully");
         return true;
     }
 
     bool deskewInfo()
     {
-        std::lock_guard<std::mutex> lock1(imuLock);
-        std::lock_guard<std::mutex> lock2(odoLock);
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] deskewInfo called, timeScanCur=%.3f, timeScanEnd=%.3f", timeScanCur, timeScanEnd);
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] IMU queue size: %d", imuQueue.size());
+        // if (!imuQueue.empty()) {
+        //     RCLCPP_INFO(this->get_logger(), "[imageProjection] IMU front time: %.3f, back time: %.3f", 
+        //         ROS_TIME(imuQueue.front().header.stamp), ROS_TIME(imuQueue.back().header.stamp));
+        // }
 
         // make sure IMU data available for the scan
         if (imuQueue.empty() || ROS_TIME(imuQueue.front().header.stamp) > timeScanCur || ROS_TIME(imuQueue.back().header.stamp) < timeScanEnd)
         {
-            RCLCPP_DEBUG(get_logger(), "Waiting for IMU data ...");
+            // RCLCPP_WARN(get_logger(), "Waiting for IMU data ...");
             return false;
         }
 
@@ -425,6 +421,7 @@ public:
 
         odomDeskewInfo();
 
+        // RCLCPP_INFO(this->get_logger(), "[imageProjection] deskewInfo completed successfully");
         return true;
     }
 

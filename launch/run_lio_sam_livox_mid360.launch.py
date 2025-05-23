@@ -67,7 +67,10 @@ def generate_launch_description():
             package='liorf',
             executable='liorf_imuPreintegration',
             name='liorf_imuPreintegration',
-            parameters=[parameter_file],
+            parameters=[parameter_file, {
+                'imu_frame': 'livox_frame',
+                'base_frame': 'base_link'
+            }],
             output='screen'
         ),
         Node(
@@ -76,7 +79,8 @@ def generate_launch_description():
             name='liorf_imageProjection',
             parameters=[parameter_file,
                     {'use_livox_data': True,
-                    'livox_time_field': 'offset_time'}],
+                    'livox_time_field': 'offset_time',
+                    'livox_frame': 'livox_frame'}],
             output='screen'
         ),
         # Node(
@@ -100,7 +104,14 @@ def generate_launch_description():
                 'point_threshold': 1,             # 그리드 셀 처리를 위한 최소 포인트 수
                 'height_diff_threshold': 0.01,     # 장애물 판단 높이 차이 임계값 (m)
                 'base_frame_id': 'base_link',     # 베이스 프레임 ID
-                'auto_resize_map': True           # 맵 자동 크기 조정 활성화
+                'auto_resize_map': True,          # 맵 자동 크기 조정 활성화
+                
+                'use_database_mode': True,                # 데이터베이스 모드 활성화
+                'db_path': '/root/liorf_ws2/src/liorf/maps/liorf_map.db',           # 데이터베이스 파일 경로
+                'active_keyframes_window_size': 100,      # 메모리에 유지할 활성 키프레임 수
+                'spatial_query_radius': 30.0,             # 공간 쿼리 반경 (m)
+                'memory_check_interval_ms': 5000,         # 메모리 체크 간격 (ms)
+                'memory_limit_mb': 2000                   # 메모리 제한 (MB)
             }],
             output='screen'
         ),
