@@ -106,7 +106,7 @@ ament_target_dependencies(${PROJECT_NAME}_imageProjection ${ros2_lib})
 target_link_libraries(${PROJECT_NAME}_imageProjection "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
 
 # Mapping Optimization Library
-add_library(${PROJECT_NAME}_mapOptmization_lib 
+add_library(${PROJECT_NAME}_mapOptmization_lib SHARED
   src/mapOptmization.cpp 
   src/costmap.cpp 
   src/loopclosure.cpp
@@ -145,8 +145,15 @@ install(
   ${PROJECT_NAME}_imageProjection
   ${PROJECT_NAME}_imuPreintegration
   ${PROJECT_NAME}_mapOptmization
-  ${PROJECT_NAME}_mapOptmization_lib
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
+  TARGETS
+  ${PROJECT_NAME}_mapOptmization_lib
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+  RUNTIME DESTINATION bin
 )
 
 install(

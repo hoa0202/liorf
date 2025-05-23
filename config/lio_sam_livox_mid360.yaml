@@ -31,7 +31,7 @@
     
     # Export settings
     savePCD: true                             # https://github.com/TixiaoShan/LIO-SAM/issues/3
-    savePCDDirectory: "/liorf-ros2/src/liorf/PCD/GlobalMap.pcd"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation
+    savePCDDirectory: "/liorf_ws2/src/liorf/PCD"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation
 
     # Sensor Settings
     sensor: livox                            # lidar sensor type, 'velodyne' or 'ouster' or 'livox' or 'robosense'
