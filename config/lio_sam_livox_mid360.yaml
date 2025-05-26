@@ -114,3 +114,23 @@
     globalMapVisualizationSearchRadius: 200.0    # meters, global map visualization radius
     globalMapVisualizationPoseDensity: 5.0       # meters, global map visualization keyframe density
     globalMapVisualizationLeafSize: 0.5           # meters, global map visualization cloud density
+
+    # Database Settings
+    use_database_mode: true                       # 데이터베이스 모드 활성화 여부 (true/false)
+    database_reset_on_start: true                # 시작할 때 데이터베이스 초기화 여부 (true: 완전 초기화 모드, false: 연속 매핑 모드)
+    database_path: "/root/liorf_ws2/src/liorf/maps/slam_map.db" # 경로 수정금지 데이터베이스 파일 경로
+    clouds_directory: "/root/liorf_ws2/src/liorf/maps/clouds"   # 경로 수정금지 포인트 클라우드 저장 디렉토리 경로
+    active_keyframes_window_size: 100             # 메모리에 유지할 최대 키프레임 수
+    spatial_query_radius: 50.0                    # 공간 쿼리 반경 (미터)
+
+    # Costmap Settings
+    costmap_resolution: 0.1                       # 코스트맵 해상도 (미터)
+    costmap_width: 20.0                           # 코스트맵 너비 (미터)
+    costmap_height: 20.0                          # 코스트맵 높이 (미터)
+    min_height_threshold: 0.15                    # 최소 높이 임계값 (미터)
+    max_height_threshold: 1.1                     # 최대 높이 임계값 (미터)
+    obstacle_threshold: 2                         # 장애물 감지 임계값
+    point_threshold: 1                            # 포인트 감지 임계값
+    height_diff_threshold: 0.01                   # 높이 차이 임계값 (미터)
+    base_frame_id: "base_link"                    # 기준 프레임 ID
+    auto_resize_map: true                         # 자동 맵 크기 조정 여부

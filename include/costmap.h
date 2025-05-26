@@ -14,27 +14,10 @@
 #include <memory>
 #include <atomic>
 
-using PointType = pcl::PointXYZI;
+// utility.h 포함 - PointTypePose 정의 사용
+#include "utility.h"
 
-// PointTypePose 정의 (mapOptimization.h와 호환성 유지)
-struct PointXYZIRPYT
-{
-    PCL_ADD_POINT4D
-    PCL_ADD_INTENSITY;                  // preferred way of adding a XYZ+padding
-    float roll;
-    float pitch;
-    float yaw;
-    double time;
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW   // make sure our new allocators are aligned
-} EIGEN_ALIGN16;                    // enforce SSE padding for correct memory alignment
-
-POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIRPYT,
-                                   (float, x, x) (float, y, y)
-                                   (float, z, z) (float, intensity, intensity)
-                                   (float, roll, roll) (float, pitch, pitch) (float, yaw, yaw)
-                                   (double, time, time))
-
-typedef PointXYZIRPYT  PointTypePose;
+// PointXYZIRPYT와 PointTypePose 정의 제거 - utility.h에서 가져옴
 
 // 클라우드 데이터 구조체 - 코스트맵 생성에 필요한 데이터 보관
 struct CloudData {

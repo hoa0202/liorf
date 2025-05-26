@@ -181,9 +181,9 @@ void CostmapGenerator::updateMapSize(const pcl::PointCloud<PointType>::Ptr& clou
                 costmap_width_ = new_width;
                 costmap_height_ = new_height;
                 
-                RCLCPP_INFO(node_->get_logger(), "Map size updated: width=%.2fm (cells=%d), height=%.2fm (cells=%d), origin=(%.2f, %.2f)",
-                           costmap_width_, costmap_width_cells_, costmap_height_, costmap_height_cells_,
-                           costmap_origin_x_, costmap_origin_y_);
+                // RCLCPP_INFO(node_->get_logger(), "Map size updated: width=%.2fm (cells=%d), height=%.2fm (cells=%d), origin=(%.2f, %.2f)",
+                //            costmap_width_, costmap_width_cells_, costmap_height_, costmap_height_cells_,
+                //            costmap_origin_x_, costmap_origin_y_);
                 
                 need_update = true;
             }
@@ -330,8 +330,8 @@ void CostmapGenerator::addRobotMarker(nav_msgs::msg::OccupancyGrid::UniquePtr& g
             }
         }
         
-        RCLCPP_INFO(node_->get_logger(), "Added robot marker at grid coords: (%d, %d), world: (%.2f, %.2f)",
-                  robot_grid_x, robot_grid_y, robot_x, robot_y);
+        // RCLCPP_INFO(node_->get_logger(), "Added robot marker at grid coords: (%d, %d), world: (%.2f, %.2f)",
+        //           robot_grid_x, robot_grid_y, robot_x, robot_y);
     } else {
         RCLCPP_WARN(node_->get_logger(), "Robot position (%.2f, %.2f) is outside map bounds!", robot_x, robot_y);
     }
@@ -452,9 +452,9 @@ nav_msgs::msg::OccupancyGrid::UniquePtr CostmapGenerator::generateCostmap(
         }
     }
     
-    RCLCPP_INFO(node_->get_logger(), "Costmap cells - Low: %d, Mid: %d, High: %d, Total grid: %dx%d (%.1fx%.1fm)", 
-               low_cells_count, mid_cells_count, high_cells_count,
-               width_cells, height_cells, costmap_width_, costmap_height_);
+    // RCLCPP_INFO(node_->get_logger(), "Costmap cells - Low: %d, Mid: %d, High: %d, Total grid: %dx%d (%.1fx%.1fm)", 
+    //            low_cells_count, mid_cells_count, high_cells_count,
+    //            width_cells, height_cells, costmap_width_, costmap_height_);
     
     // 로봇 위치 마커 추가
     addRobotMarker(grid_msg);
@@ -635,8 +635,8 @@ void CostmapGenerator::costmapThreadFunc()
             *merged_cloud += *transformed_cloud;
         }
         
-        RCLCPP_INFO(node_->get_logger(), "Costmap update: using %d/%ld frames, step=%d", 
-                std::min(max_samples, static_cast<int>(frameCount)), frameCount, step);
+        // RCLCPP_INFO(node_->get_logger(), "Costmap update: using %d/%ld frames, step=%d", 
+        //         std::min(max_samples, static_cast<int>(frameCount)), frameCount, step);
         
         // 포인트가 부족하면 반환
         if (merged_cloud->points.empty())
@@ -647,8 +647,8 @@ void CostmapGenerator::costmapThreadFunc()
         downSizeFilterMap.setInputCloud(merged_cloud);
         downSizeFilterMap.filter(*filtered_cloud);
         
-        RCLCPP_INFO(node_->get_logger(), "Costmap cloud size: %ld points (after filtering: %ld points)",
-               merged_cloud->points.size(), filtered_cloud->points.size());
+        // RCLCPP_INFO(node_->get_logger(), "Costmap cloud size: %ld points (after filtering: %ld points)",
+        //        merged_cloud->points.size(), filtered_cloud->points.size());
         
         // 코스트맵 생성기를 통해 OccupancyGrid 생성 
         auto costmap = generateCostmap(filtered_cloud);

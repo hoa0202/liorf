@@ -50,6 +50,10 @@ find_package(Eigen REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(Boost REQUIRED COMPONENTS timer)
 
+# SQLite3 라이브러리 찾기
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SQLITE3 REQUIRED sqlite3)
+
 set(ros2_lib "rclcpp;rclpy;std_msgs;sensor_msgs;geometry_msgs;nav_msgs;cv_bridge;pcl_msgs;pcl_conversions;visualization_msgs;tf2;tf2_ros;tf2_eigen;tf2_sensor_msgs;tf2_geometry_msgs;pcl_ros")  # pcl_ros 추가
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "/usr/share/cmake/geographiclib/")
@@ -78,6 +82,7 @@ include_directories(
   ${OpenCV_INCLUDE_DIRS}
   ${GTSAM_INCLUDE_DIR}
   ${pcl_ros_INCLUDE_DIRS}
+  ${SQLITE3_INCLUDE_DIRS}
 )
 
 # link directories
@@ -87,6 +92,7 @@ link_directories(
   ${PCL_LIBRARY_DIRS}
   ${OpenCV_LIBRARY_DIRS}
   ${GTSAM_LIBRARY_DIRS}
+  ${SQLITE3_LIBRARY_DIRS}
 )
 
 file(GLOB common_lib "lib/*.cpp")
@@ -105,6 +111,7 @@ add_library(${PROJECT_NAME}_mapOptmization_lib SHARED
   src/mapOptmization.cpp 
   src/costmap.cpp 
   src/loopclosure.cpp
+  src/db_manager.cpp
   ${common_lib} 
   include/Scancontext.cpp
 )
@@ -118,7 +125,7 @@ if(USE_PCH)
   )
 endif()
 ament_target_dependencies(${PROJECT_NAME}_mapOptmization_lib ${ros2_lib})
-target_link_libraries(${PROJECT_NAME}_mapOptmization_lib Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam)
+target_link_libraries(${PROJECT_NAME}_mapOptmization_lib Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam ${SQLITE3_LIBRARIES})
 
 # Mapping Optimization Executable
 add_executable(${PROJECT_NAME}_mapOptmization src/main.cpp)

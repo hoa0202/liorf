@@ -92,6 +92,86 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
             obstacle_threshold, point_threshold, height_diff_threshold,
             base_frame_id, auto_resize_map
         );
+        
+        RCLCPP_INFO(this->get_logger(), "Costmap integration initialized with resolution: %.2f, size: %.1fm x %.1fm, origin: (%.2f, %.2f)",
+                   costmap_resolution, costmap_width, costmap_height, -costmap_width/2, -costmap_height/2);
+
+        // 데이터베이스 관리자 초기화
+        use_database_mode_ = this->declare_parameter<bool>("use_database_mode", false);
+        active_keyframes_window_size_ = this->declare_parameter<int>("active_keyframes_window_size", 100);
+        spatial_query_radius_ = this->declare_parameter<double>("spatial_query_radius", 50.0);
+        std::string db_path = this->declare_parameter<std::string>("database_path", "slam_map.db");
+        std::string clouds_directory = this->declare_parameter<std::string>("clouds_directory", "");
+        bool database_reset_on_start = this->declare_parameter<bool>("database_reset_on_start", false);
+        
+        if (use_database_mode_) {
+            try {
+                RCLCPP_INFO(this->get_logger(), "데이터베이스 모드 활성화: %s", db_path.c_str());
+                if (!clouds_directory.empty()) {
+                    RCLCPP_INFO(this->get_logger(), "포인트 클라우드 디렉토리: %s", clouds_directory.c_str());
+                }
+                
+                // SQLite 라이브러리 버전 확인
+                RCLCPP_INFO(this->get_logger(), "SQLite 버전: %s", sqlite3_libversion());
+                
+                // 상대 경로를 절대 경로로 변환 (이중 처리를 위한 안전장치)
+                if (!db_path.empty() && db_path[0] != '/') {
+                    // 상대 경로는 현재 패키지 디렉토리 기준으로 처리
+                    char cwd[1024];
+                    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+                        RCLCPP_INFO(this->get_logger(), "현재 작업 디렉토리: %s", cwd);
+                        // 상대 경로일 경우 절대 경로로 변환
+                        if (db_path.find("~/") == 0) {
+                            // ~/ 로 시작하는 경로는 홈 디렉토리로 변환
+                            db_path = std::string(std::getenv("HOME")) + db_path.substr(1);
+                        } else if (db_path[0] != '/') {
+                            // 절대 경로가 아니면 현재 디렉토리 기준으로 처리
+                            db_path = std::string(cwd) + "/" + db_path;
+                        }
+                    }
+                }
+                
+                // 클라우드 디렉토리도 동일하게 처리
+                if (!clouds_directory.empty() && clouds_directory[0] != '/') {
+                    if (clouds_directory.find("~/") == 0) {
+                        clouds_directory = std::string(std::getenv("HOME")) + clouds_directory.substr(1);
+                    } else {
+                        char cwd[1024];
+                        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+                            clouds_directory = std::string(cwd) + "/" + clouds_directory;
+                        }
+                    }
+                }
+                
+                RCLCPP_INFO(this->get_logger(), "최종 데이터베이스 경로: %s", db_path.c_str());
+                RCLCPP_INFO(this->get_logger(), "최종 클라우드 디렉토리: %s", clouds_directory.c_str());
+                RCLCPP_INFO(this->get_logger(), "데이터베이스 초기화 모드: %s", database_reset_on_start ? "완전 초기화" : "연속 매핑");
+                
+                db_manager_ = std::make_unique<DBManager>(
+                    this,
+                    db_path,
+                    active_keyframes_window_size_,
+                    spatial_query_radius_,
+                    clouds_directory,
+                    database_reset_on_start
+                );
+                
+                if (!db_manager_->initialize()) {
+                    RCLCPP_ERROR(this->get_logger(), "데이터베이스 초기화 실패, 데이터베이스 모드 비활성화");
+                    db_manager_.reset();
+                    use_database_mode_ = false;
+                } else {
+                    RCLCPP_INFO(this->get_logger(), "데이터베이스 관리자 초기화 성공");
+                    db_manager_->startMemoryMonitoring();
+                }
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "데이터베이스 초기화 중 예외 발생: %s", e.what());
+                db_manager_.reset();
+                use_database_mode_ = false;
+            }
+        } else {
+            RCLCPP_INFO(this->get_logger(), "메모리 기반 모드로 실행 중 (데이터베이스 비활성화)");
+        }
 
     // Loop Closure 모듈 초기화 - 명시적으로 파라미터 전달
     double historyKeyframeSearchRadius = 10.0;
@@ -822,6 +902,31 @@ void mapOptimization::saveKeyFramesAndFactor()
 
         // save key frame cloud
         surfCloudKeyFrames.push_back(thisSurfKeyFrame);
+        
+        // 데이터베이스에 키프레임 및 포즈 저장
+        if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
+            int keyframe_id = cloudKeyPoses3D->size() - 1;
+            PointTypePose pose = cloudKeyPoses6D->points[keyframe_id];
+            
+            // 현재 프레임의 포인트 클라우드
+            pcl::PointCloud<PointType>::Ptr thisKeyFrame(new pcl::PointCloud<PointType>());
+            pcl::copyPointCloud(*laserCloudSurfLastDS, *thisKeyFrame);
+            
+            // 데이터베이스에 저장
+            if (!db_manager_->addKeyFrame(keyframe_id, timeLaserInfoCur, pose, thisKeyFrame)) {
+                RCLCPP_ERROR(this->get_logger(), "키프레임 ID %d를 데이터베이스에 저장하지 못했습니다", keyframe_id);
+            } else {
+                RCLCPP_DEBUG(this->get_logger(), "키프레임 ID %d가 데이터베이스에 저장되었습니다", keyframe_id);
+            }
+            
+            // 메모리 관리: 키프레임 수가 지정된 한계를 초과하면 오래된 프레임 정리
+            if (static_cast<int>(surfCloudKeyFrames.size()) > active_keyframes_window_size_) {
+                clearOldFrames();
+            }
+            
+            // 활성 윈도우 업데이트
+            updateActiveWindow(thisPose6D);
+        }
 
         // The following code is copy from sc-lio-sam
         // Scan Context loop detector - giseop
@@ -1054,6 +1159,136 @@ void mapOptimization::clearOldFrames()
             int oldestIdx = i;
             laserCloudMapContainer.erase(oldestIdx);
         }
+    }
+    
+    // 데이터베이스 모드일 경우 활성 윈도우 업데이트
+    if (use_database_mode_ && db_manager_ && db_manager_->isInitialized() && !cloudKeyPoses6D->empty()) {
+        // 현재 위치 기준으로 필요한 키프레임만 메모리에 유지
+        PointTypePose currentPose = cloudKeyPoses6D->back();
+        db_manager_->updateActiveWindow(currentPose);
+    }
+}
+
+void mapOptimization::updateActiveWindow(const PointTypePose& current_pose) {
+    if (!use_database_mode_ || !db_manager_ || !db_manager_->isInitialized()) {
+        return;
+    }
+    
+    // 현재 포즈 정보를 사용하여 활성 윈도우 업데이트
+    db_manager_->updateActiveWindow(current_pose);
+}
+
+void mapOptimization::loadKeyFramesFromDB() {
+    if (!use_database_mode_ || !db_manager_ || !db_manager_->isInitialized()) {
+        return;
+    }
+    
+    // 현재 위치 근처의 키프레임 로드
+    PointTypePose currentPose = trans2PointTypePose(transformTobeMapped);
+    std::vector<int> nearbyFrameIds = db_manager_->loadKeyFramesByRadius(
+        currentPose, 
+        spatial_query_radius_, 
+        active_keyframes_window_size_
+    );
+    
+    if (nearbyFrameIds.empty()) {
+        RCLCPP_INFO(this->get_logger(), "근처에 로드할 키프레임 없음");
+        return;
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "%lu개의 키프레임 로드됨", nearbyFrameIds.size());
+    
+    // 로드된 키프레임 메모리에 추가
+    for (const auto& id : nearbyFrameIds) {
+        // 이미 메모리에 있는지 확인
+        bool already_loaded = false;
+        for (const auto& point : cloudKeyPoses3D->points) {
+            if (static_cast<int>(point.intensity) == id) {
+                already_loaded = true;
+                break;
+            }
+        }
+        
+        if (!already_loaded) {
+            pcl::PointCloud<PointType>::Ptr cloud = db_manager_->loadCloud(id);
+            if (cloud && cloud->size() > 0) {
+                // 메모리에 추가
+                surfCloudKeyFrames.push_back(cloud);
+                
+                // 키프레임 정보 쿼리해서 포즈 추가
+                std::string sql = "SELECT x, y, z, roll, pitch, yaw, timestamp FROM keyframes WHERE id = ?;";
+                
+                sqlite3_stmt* stmt;
+                int rc = sqlite3_prepare_v2(db_manager_->getDB(), sql.c_str(), -1, &stmt, nullptr);
+                if (rc != SQLITE_OK) {
+                    RCLCPP_ERROR(this->get_logger(), "SQL 준비 실패: %s", sqlite3_errmsg(db_manager_->getDB()));
+                    continue;
+                }
+                
+                sqlite3_bind_int(stmt, 1, id);
+                
+                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                    double x = sqlite3_column_double(stmt, 0);
+                    double y = sqlite3_column_double(stmt, 1);
+                    double z = sqlite3_column_double(stmt, 2);
+                    double roll = sqlite3_column_double(stmt, 3);
+                    double pitch = sqlite3_column_double(stmt, 4);
+                    double yaw = sqlite3_column_double(stmt, 5);
+                    double timestamp = sqlite3_column_double(stmt, 6);
+                    
+                    // 포즈 정보 추가
+                    PointType pose3D;
+                    pose3D.x = x;
+                    pose3D.y = y;
+                    pose3D.z = z;
+                    pose3D.intensity = id;
+                    cloudKeyPoses3D->push_back(pose3D);
+                    
+                    PointTypePose pose6D;
+                    pose6D.x = x;
+                    pose6D.y = y;
+                    pose6D.z = z;
+                    pose6D.roll = roll;
+                    pose6D.pitch = pitch;
+                    pose6D.yaw = yaw;
+                    pose6D.time = timestamp;
+                    pose6D.intensity = id;
+                    cloudKeyPoses6D->push_back(pose6D);
+                    
+                    RCLCPP_DEBUG(this->get_logger(), "키프레임 ID %d 로드됨", id);
+                }
+                
+                sqlite3_finalize(stmt);
+            }
+        }
+    }
+    
+    // 주변 키프레임 맵 업데이트
+    if (!nearbyFrameIds.empty()) {
+        extractSurroundingKeyFrames();
+    }
+}
+
+void mapOptimization::initializeDBManager() {
+    if (!use_database_mode_ || !db_manager_) {
+        return;
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "데이터베이스에서 이전 맵 데이터 로드 중...");
+    
+    // 데이터베이스에서 전역 맵 로드
+    pcl::PointCloud<PointType>::Ptr global_map = db_manager_->loadGlobalMap(mappingSurfLeafSize);
+    if (global_map && global_map->size() > 0) {
+        // 전역 맵 발행
+        sensor_msgs::msg::PointCloud2 globalMapMsg;
+        pcl::toROSMsg(*global_map, globalMapMsg);
+        globalMapMsg.header.stamp = this->now();
+        globalMapMsg.header.frame_id = odometryFrame;
+        pubLaserCloudSurround->publish(globalMapMsg);
+        
+        RCLCPP_INFO(this->get_logger(), "전역 맵 로드 완료: %lu 포인트", global_map->size());
+    } else {
+        RCLCPP_INFO(this->get_logger(), "로드할 전역 맵 없음, 새 맵 생성");
     }
 }
 
