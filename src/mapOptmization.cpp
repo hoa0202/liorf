@@ -188,12 +188,14 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
     RCLCPP_INFO(this->get_logger(), "Initializing Loop Closure with parameters: radius=%f, num=%d, timeDiff=%f, fitnessScore=%f",
         historyKeyframeSearchRadius, historyKeyframeSearchNum, historyKeyframeSearchTimeDiff, historyKeyframeFitnessScore);
     
+    // 루프 클로저 초기화 - DB 관리자 전달
     loop_closure_ = std::make_unique<LoopClosure>(
-        this, 
+        this,
         historyKeyframeSearchRadius,
         historyKeyframeSearchNum,
         historyKeyframeSearchTimeDiff,
-        historyKeyframeFitnessScore
+        historyKeyframeFitnessScore,
+        use_database_mode_ ? db_manager_.get() : nullptr  // DB 관리자 전달
     );
 }
 
@@ -283,8 +285,16 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
     }
     
     // Loop Closure 모듈에 데이터 전달
-    if (loop_closure_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
-        loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur);
+    if (loop_closure_ && cloudKeyPoses3D && cloudKeyPoses6D) {
+        if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
+            // DB 모드 - 포즈 정보만 전달
+            loop_closure_->setInputDataWithDB(cloudKeyPoses3D, cloudKeyPoses6D, timeLaserInfoCur);
+            RCLCPP_DEBUG(this->get_logger(), "Publishing map: Loop closure using DB mode");
+        } else if (!surfCloudKeyFrames.empty()) {
+            // 기존 메모리 모드
+            loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur);
+            RCLCPP_DEBUG(this->get_logger(), "Publishing map: Loop closure using memory-only mode");
+        }
     }
 }
 
@@ -935,13 +945,20 @@ void mapOptimization::saveKeyFramesAndFactor()
         // - MULTI_SCAN_FEAT: using NearKeyframes (because a MulRan scan does not have beyond region, so to solve this issue ... )
         
         // Loop Closure 모듈에 데이터 전달 - SC Manager 관련 작업도 Loop Closure 내부에서 처리
-        if (loop_closure_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
-            // 현재 스캔 데이터도 함께 전달
-            pcl::PointCloud<PointType>::Ptr thisRawCloudKeyFrame(new pcl::PointCloud<PointType>());
-            pcl::fromROSMsg(cloudInfo.cloud_deskewed, *thisRawCloudKeyFrame);
-            
-            // 루프 클로저에 데이터 전달 - Scan Context 생성 작업은 Loop Closure 내부에서 수행
-            loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur, thisRawCloudKeyFrame);
+        if (loop_closure_) {
+            if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
+                // DB 모드 - 포즈 정보만 전달
+                pcl::PointCloud<PointType>::Ptr thisRawCloudKeyFrame(new pcl::PointCloud<PointType>());
+                pcl::fromROSMsg(cloudInfo.cloud_deskewed, *thisRawCloudKeyFrame);
+                loop_closure_->setInputDataWithDB(cloudKeyPoses3D, cloudKeyPoses6D, timeLaserInfoCur, thisRawCloudKeyFrame);
+                RCLCPP_DEBUG(this->get_logger(), "Loop closure using DB mode");
+            } else {
+                // 기존 메모리 모드
+                pcl::PointCloud<PointType>::Ptr thisRawCloudKeyFrame(new pcl::PointCloud<PointType>());
+                pcl::fromROSMsg(cloudInfo.cloud_deskewed, *thisRawCloudKeyFrame);
+                loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur, thisRawCloudKeyFrame);
+                RCLCPP_DEBUG(this->get_logger(), "Loop closure using memory-only mode");
+            }
         }
 
         // save path for visualization

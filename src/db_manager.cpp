@@ -363,10 +363,13 @@ pcl::PointCloud<PointType>::Ptr DBManager::loadCloud(int keyframe_id) {
     // 먼저 메모리 캐시에서 확인
     auto it = cloud_cache_.find(keyframe_id);
     if (it != cloud_cache_.end() && it->second) {
+        // 캐시 히트 로그 제거
         return it->second;
     }
     
     // 캐시에 없으면 데이터베이스에서 조회
+    RCLCPP_ERROR(node_->get_logger(), "★★★ DB 로드: 키프레임 ID=%d ★★★", keyframe_id);
+    
     std::string sql = "SELECT cloud_file FROM keyframes WHERE id = ?;";
     
     sqlite3_stmt* stmt;
@@ -400,6 +403,10 @@ pcl::PointCloud<PointType>::Ptr DBManager::loadCloud(int keyframe_id) {
         RCLCPP_ERROR(node_->get_logger(), "포인트 클라우드 로드 실패: ID=%d", keyframe_id);
         return nullptr;
     }
+    
+    // 로그 추가 - DB에서 성공적으로 로드됨
+    RCLCPP_ERROR(node_->get_logger(), "★★★ DB 로드 완료: 키프레임 ID=%d (포인트 수: %zu) ★★★", 
+               keyframe_id, cloud->size());
     
     // 캐시에 저장
     cloud_cache_[keyframe_id] = cloud;
@@ -493,6 +500,8 @@ std::vector<int> DBManager::loadKeyFramesByRadius(const PointTypePose& current_p
     std::vector<int> result;
     
     // R-tree를 사용한 공간 쿼리
+    // RCLCPP_INFO(node_->get_logger(), "DB에서 반경 %.2f 내의 키프레임 검색 중", radius);
+    
     std::string sql = "SELECT k.id FROM keyframes k "
                       "JOIN keyframes_rtree r ON k.id = r.id "
                       "WHERE r.min_x <= ? AND r.max_x >= ? "
@@ -533,6 +542,10 @@ std::vector<int> DBManager::loadKeyFramesByRadius(const PointTypePose& current_p
     }
     
     sqlite3_finalize(stmt);
+    
+    // 쿼리 결과 로그 추가
+    // RCLCPP_WARN(node_->get_logger(), "✓ [공간 쿼리 완료] %zu개 키프레임 발견 (최대 요청: %d)", 
+    //            result.size(), max_keyframes);
     
     return result;
 }
@@ -598,6 +611,10 @@ pcl::PointCloud<PointType>::Ptr DBManager::loadGlobalMap(float leaf_size) {
 void DBManager::updateActiveWindow(const PointTypePose& current_pose) {
     if (!initialized_) return;
     
+    // 로그 추가 - 활성 윈도우 업데이트 시작
+    // RCLCPP_WARN(node_->get_logger(), "🔄 [활성 윈도우 업데이트] 시작 - 현재 위치(%.2f, %.2f, %.2f)", 
+    //            current_pose.x, current_pose.y, current_pose.z);
+    
     // 공간 쿼리로 현재 위치 주변의 키프레임 로드
     std::vector<int> nearby_keyframes = loadKeyFramesByRadius(
         current_pose, 
@@ -626,6 +643,10 @@ void DBManager::updateActiveWindow(const PointTypePose& current_pose) {
     
     // 메모리 제한 적용
     enforceMemoryLimit();
+    
+    // 로그 추가 - 활성 윈도우 업데이트 완료
+    // RCLCPP_WARN(node_->get_logger(), "✓ [활성 윈도우 업데이트] 완료 - 활성 키프레임: %zu개, 제거된 캐시: %zu개", 
+    //            active_keyframe_ids_.size(), keys_to_remove.size());
 }
 
 void DBManager::startMemoryMonitoring() {

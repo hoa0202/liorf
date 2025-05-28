@@ -5,7 +5,8 @@ LoopClosure::LoopClosure(rclcpp::Node* node,
                         double historyKeyframeSearchRadius,
                         int historyKeyframeSearchNum,
                         double historyKeyframeSearchTimeDiff,
-                        double historyKeyframeFitnessScore) 
+                        double historyKeyframeFitnessScore,
+                        DBManager* db_manager) 
     : node_(node),
     aLoopIsClosed(false),
     isRunning(false),
@@ -13,11 +14,19 @@ LoopClosure::LoopClosure(rclcpp::Node* node,
     historyKeyframeSearchRadius(historyKeyframeSearchRadius),
     historyKeyframeSearchNum(historyKeyframeSearchNum),
     historyKeyframeSearchTimeDiff(historyKeyframeSearchTimeDiff),
-    historyKeyframeFitnessScore(historyKeyframeFitnessScore)
+    historyKeyframeFitnessScore(historyKeyframeFitnessScore),
+    db_manager_(db_manager),
+    use_db_mode_(db_manager != nullptr)
 {
     // 파라미터 로깅
     RCLCPP_INFO(node_->get_logger(), "Loop closure parameters: historyKeyframeSearchRadius=%f, historyKeyframeSearchNum=%d, historyKeyframeSearchTimeDiff=%f, historyKeyframeFitnessScore=%f", 
         historyKeyframeSearchRadius, historyKeyframeSearchNum, historyKeyframeSearchTimeDiff, historyKeyframeFitnessScore);
+    
+    if (use_db_mode_) {
+        RCLCPP_INFO(node_->get_logger(), "Loop closure is using DB mode");
+    } else {
+        RCLCPP_INFO(node_->get_logger(), "Loop closure is using memory-only mode");
+    }
 
     // 포인트 클라우드 초기화
     cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
@@ -78,6 +87,23 @@ void LoopClosure::loopClosureThread()
     }
 }
 
+// DB 모드에서 키프레임 가져오기
+pcl::PointCloud<PointType>::Ptr LoopClosure::getKeyFrameFromDB(int keyframe_id) {
+    if (!use_db_mode_ || !db_manager_ || !db_manager_->isInitialized()) {
+        RCLCPP_ERROR(node_->get_logger(), "DB 모드가 아니거나 DB 관리자가 초기화되지 않았습니다");
+        return nullptr;
+    }
+    
+    pcl::PointCloud<PointType>::Ptr cloud = db_manager_->loadCloud(keyframe_id);
+    if (!cloud || cloud->empty()) {
+        RCLCPP_ERROR(node_->get_logger(), "키프레임 ID %d를 DB에서 로드하지 못했습니다", keyframe_id);
+        return nullptr;
+    }
+    
+    return cloud;
+}
+
+// 기존 메모리 모드 setInputData
 void LoopClosure::setInputData(pcl::PointCloud<PointType>::Ptr& keyPoses3D, 
                               pcl::PointCloud<PointTypePose>::Ptr& keyPoses6D,
                               std::vector<pcl::PointCloud<PointType>::Ptr>& surfKeyFrames,
@@ -89,7 +115,12 @@ void LoopClosure::setInputData(pcl::PointCloud<PointType>::Ptr& keyPoses3D,
     // 데이터 복사
     *cloudKeyPoses3D = *keyPoses3D;
     *cloudKeyPoses6D = *keyPoses6D;
-    surfCloudKeyFrames = surfKeyFrames;
+    
+    // DB 모드가 아닐 때만 서페이스 클라우드 키프레임 복사
+    if (!use_db_mode_) {
+        surfCloudKeyFrames = surfKeyFrames;
+    }
+    
     timeLaserInfoCur = currentTimestamp;
     
     // Scan Context 생성
@@ -99,6 +130,37 @@ void LoopClosure::setInputData(pcl::PointCloud<PointType>::Ptr& keyPoses3D,
             sc_manager_->makeAndSaveScancontextAndKeys(*currentScan);
             
             // 디버그 메시지
+            RCLCPP_DEBUG(node_->get_logger(), "SC Manager processed current scan successfully");
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(node_->get_logger(), "Error in SC Manager while processing scan: %s", e.what());
+        }
+    }
+}
+
+// DB 모드용 setInputData - surfCloudKeyFrames 참조 없이 DB에서 직접 로드
+void LoopClosure::setInputDataWithDB(pcl::PointCloud<PointType>::Ptr& keyPoses3D, 
+                                    pcl::PointCloud<PointTypePose>::Ptr& keyPoses6D, 
+                                    double currentTimestamp,
+                                    pcl::PointCloud<PointType>::Ptr currentScan)
+{
+    std::lock_guard<std::mutex> lock(mtx);
+
+    if (!use_db_mode_ || !db_manager_) {
+        RCLCPP_ERROR(node_->get_logger(), "DB 모드가 아니거나 DB 관리자가 설정되지 않았습니다");
+        return;
+    }
+
+    // 포즈 데이터 복사
+    *cloudKeyPoses3D = *keyPoses3D;
+    *cloudKeyPoses6D = *keyPoses6D;
+    timeLaserInfoCur = currentTimestamp;
+    
+    // surfCloudKeyFrames는 필요할 때마다 DB에서 로드하므로 여기서는 복사하지 않음
+    
+    // Scan Context 처리
+    if (sc_manager_ && currentScan) {
+        try {
+            sc_manager_->makeAndSaveScancontextAndKeys(*currentScan);
             RCLCPP_DEBUG(node_->get_logger(), "SC Manager processed current scan successfully");
         } catch (const std::exception& e) {
             RCLCPP_ERROR(node_->get_logger(), "Error in SC Manager while processing scan: %s", e.what());
@@ -136,8 +198,29 @@ void LoopClosure::performRSLoopClosure()
     pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
     pcl::PointCloud<PointType>::Ptr prevKeyframeCloud(new pcl::PointCloud<PointType>());
     {
-        loopFindNearKeyFrames(cureKeyframeCloud, loopKeyCur, 0, -1);
-        loopFindNearKeyFrames(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum, -1);
+        // DB 모드에 따라 다른 방식으로 키프레임 로드
+        if (use_db_mode_ && db_manager_) {
+            // 현재 키프레임 로드
+            auto curCloud = getKeyFrameFromDB(loopKeyCur);
+            if (curCloud) {
+                loopFindNearKeyFrames(cureKeyframeCloud, loopKeyCur, 0, -1);
+            } else {
+                return;
+            }
+            
+            // 이전 키프레임 로드
+            auto prevCloud = getKeyFrameFromDB(loopKeyPre);
+            if (prevCloud) {
+                loopFindNearKeyFrames(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum, -1);
+            } else {
+                return;
+            }
+        } else {
+            // 기존 메모리 방식
+            loopFindNearKeyFrames(cureKeyframeCloud, loopKeyCur, 0, -1);
+            loopFindNearKeyFrames(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum, -1);
+        }
+        
         if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000)
             return;
         if (pubHistoryKeyFrames->get_subscription_count() != 0)
@@ -396,15 +479,38 @@ void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKey
     // extract near keyframes
     nearKeyframes->clear();
     int cloudSize = cloudKeyPoses6D->size();
-    for (int i = -searchNum; i <= searchNum; ++i)
-    {
-        int keyNear = key + i;
-        if (keyNear < 0 || keyNear >= cloudSize)
-            continue;
+    
+    // DB 모드일 경우 DB에서 키프레임 로드
+    if (use_db_mode_ && db_manager_) {
+        for (int i = -searchNum; i <= searchNum; ++i) {
+            int keyNear = key + i;
+            if (keyNear < 0 || keyNear >= cloudSize)
+                continue;
 
-        int select_loop_index = (loop_index != -1) ? loop_index : key + i;
-        pcl::PointCloud<PointType>::Ptr transformed_cloud = transformPointCloud(surfCloudKeyFrames[keyNear], &cloudKeyPoses6D->points[select_loop_index]);
-        *nearKeyframes += *transformed_cloud;
+            int select_loop_index = (loop_index != -1) ? loop_index : key + i;
+            
+            // DB에서 포인트 클라우드 로드
+            pcl::PointCloud<PointType>::Ptr cloud = getKeyFrameFromDB(keyNear);
+            if (!cloud || cloud->empty()) {
+                RCLCPP_ERROR(node_->get_logger(), "키프레임 ID %d를 DB에서 로드하지 못했습니다", keyNear);
+                continue;
+            }
+            
+            // 변환 및 추가
+            pcl::PointCloud<PointType>::Ptr transformed_cloud = transformPointCloud(cloud, &cloudKeyPoses6D->points[select_loop_index]);
+            *nearKeyframes += *transformed_cloud;
+        }
+    } else {
+        // 기존 메모리 모드
+        for (int i = -searchNum; i <= searchNum; ++i) {
+            int keyNear = key + i;
+            if (keyNear < 0 || keyNear >= cloudSize || keyNear >= (int)surfCloudKeyFrames.size())
+                continue;
+
+            int select_loop_index = (loop_index != -1) ? loop_index : key + i;
+            pcl::PointCloud<PointType>::Ptr transformed_cloud = transformPointCloud(surfCloudKeyFrames[keyNear], &cloudKeyPoses6D->points[select_loop_index]);
+            *nearKeyframes += *transformed_cloud;
+        }
     }
 
     if (nearKeyframes->empty())
