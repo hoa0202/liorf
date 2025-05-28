@@ -18,6 +18,7 @@
 #include <chrono>
 #include <unistd.h>
 #include <fstream>
+#include <map>
 
 // utility.h 파일 포함 이동 (모든 타입 정의 확인을 위해)
 #include "utility.h"
@@ -104,6 +105,9 @@ private:
     // 메모리 모니터링 함수
     void memoryMonitoringThread();
     void enforceMemoryLimit();
+    
+    // 시스템 메모리 사용량 확인 함수
+    std::map<std::string, size_t> getProcessMemoryUsage();
     
     // 파일 시스템 유틸리티
     void createDirectoryIfNotExists(const std::string& directory);

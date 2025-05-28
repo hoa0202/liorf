@@ -82,6 +82,9 @@ void LoopClosure::loopClosureThread()
         performSCLoopClosure();
         visualizeLoopClosure();
         
+        // 임시 캐시 정리
+        clearTemporaryCache();
+        
         // Clear loop flag
         aLoopIsClosed = false;
     }
@@ -94,13 +97,34 @@ pcl::PointCloud<PointType>::Ptr LoopClosure::getKeyFrameFromDB(int keyframe_id) 
         return nullptr;
     }
     
+    // 임시 캐시에 이미 있는지 확인
+    auto cache_it = tempCloudCache.find(keyframe_id);
+    if (cache_it != tempCloudCache.end()) {
+        return cache_it->second;
+    }
+    
+    // DB에서 로드 (디버그 레벨로 변경)
+    RCLCPP_DEBUG(node_->get_logger(), "루프 클로저: DB에서 키프레임 ID=%d 로드", keyframe_id);
     pcl::PointCloud<PointType>::Ptr cloud = db_manager_->loadCloud(keyframe_id);
     if (!cloud || cloud->empty()) {
         RCLCPP_ERROR(node_->get_logger(), "키프레임 ID %d를 DB에서 로드하지 못했습니다", keyframe_id);
         return nullptr;
     }
     
+    // 임시 캐시에 저장
+    tempCloudCache[keyframe_id] = cloud;
+    
     return cloud;
+}
+
+// 임시 캐시 정리 함수
+void LoopClosure::clearTemporaryCache() {
+    std::lock_guard<std::mutex> lock(mtx);
+    if (!tempCloudCache.empty()) {
+        size_t count = tempCloudCache.size();
+        tempCloudCache.clear();
+        // RCLCPP_INFO(node_->get_logger(), "★★★ 루프 클로저 임시 캐시 정리: %zu 키프레임 해제됨 ★★★", count);
+    }
 }
 
 // 기존 메모리 모드 setInputData
@@ -482,14 +506,22 @@ void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKey
     
     // DB 모드일 경우 DB에서 키프레임 로드
     if (use_db_mode_ && db_manager_) {
+        std::vector<int> keys_to_load;
+        
+        // 먼저 로드할 키 ID 목록 수집
         for (int i = -searchNum; i <= searchNum; ++i) {
             int keyNear = key + i;
             if (keyNear < 0 || keyNear >= cloudSize)
                 continue;
-
-            int select_loop_index = (loop_index != -1) ? loop_index : key + i;
+                
+            keys_to_load.push_back(keyNear);
+        }
+        
+        // 각 키에 대해 DB에서 포인트 클라우드 로드 및 변환
+        for (int keyNear : keys_to_load) {
+            int select_loop_index = (loop_index != -1) ? loop_index : keyNear;
             
-            // DB에서 포인트 클라우드 로드
+            // DB에서 포인트 클라우드 로드 (임시 캐시 사용)
             pcl::PointCloud<PointType>::Ptr cloud = getKeyFrameFromDB(keyNear);
             if (!cloud || cloud->empty()) {
                 RCLCPP_ERROR(node_->get_logger(), "키프레임 ID %d를 DB에서 로드하지 못했습니다", keyNear);
@@ -507,7 +539,7 @@ void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKey
             if (keyNear < 0 || keyNear >= cloudSize || keyNear >= (int)surfCloudKeyFrames.size())
                 continue;
 
-            int select_loop_index = (loop_index != -1) ? loop_index : key + i;
+            int select_loop_index = (loop_index != -1) ? loop_index : keyNear;
             pcl::PointCloud<PointType>::Ptr transformed_cloud = transformPointCloud(surfCloudKeyFrames[keyNear], &cloudKeyPoses6D->points[select_loop_index]);
             *nearKeyframes += *transformed_cloud;
         }

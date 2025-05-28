@@ -45,8 +45,11 @@ DBManager::DBManager(rclcpp::Node* node,
     
     RCLCPP_INFO(node_->get_logger(), "DBManager 초기화: 데이터베이스 경로 = %s", db_path_.c_str());
     RCLCPP_INFO(node_->get_logger(), "포인트 클라우드 저장 경로 = %s", clouds_directory_.c_str());
+    
+    // 메모리 제한 로그 - 일관된 형식 유지
     RCLCPP_INFO(node_->get_logger(), "메모리 키프레임 제한: %d, 공간 쿼리 반경: %.2f", 
                max_memory_keyframes_, spatial_query_radius_);
+               
     RCLCPP_INFO(node_->get_logger(), "시작 시 데이터베이스 초기화: %s", 
                reset_on_start_ ? "활성화 (완전 초기화 모드)" : "비활성화 (연속 매핑 모드)");
 }
@@ -368,7 +371,8 @@ pcl::PointCloud<PointType>::Ptr DBManager::loadCloud(int keyframe_id) {
     }
     
     // 캐시에 없으면 데이터베이스에서 조회
-    RCLCPP_ERROR(node_->get_logger(), "★★★ DB 로드: 키프레임 ID=%d ★★★", keyframe_id);
+    // 로그 레벨을 ERROR에서 DEBUG로 변경 - 로그가 너무 많이 출력되는 것 방지
+    RCLCPP_DEBUG(node_->get_logger(), "DB 로드: 키프레임 ID=%d", keyframe_id);
     
     std::string sql = "SELECT cloud_file FROM keyframes WHERE id = ?;";
     
@@ -404,8 +408,8 @@ pcl::PointCloud<PointType>::Ptr DBManager::loadCloud(int keyframe_id) {
         return nullptr;
     }
     
-    // 로그 추가 - DB에서 성공적으로 로드됨
-    RCLCPP_ERROR(node_->get_logger(), "★★★ DB 로드 완료: 키프레임 ID=%d (포인트 수: %zu) ★★★", 
+    // 로그 추가 - DB에서 성공적으로 로드됨 (DEBUG 레벨로 변경)
+    RCLCPP_DEBUG(node_->get_logger(), "★★★ DB 로드 완료: 키프레임 ID=%d (포인트 수: %zu) ★★★", 
                keyframe_id, cloud->size());
     
     // 캐시에 저장
@@ -611,10 +615,6 @@ pcl::PointCloud<PointType>::Ptr DBManager::loadGlobalMap(float leaf_size) {
 void DBManager::updateActiveWindow(const PointTypePose& current_pose) {
     if (!initialized_) return;
     
-    // 로그 추가 - 활성 윈도우 업데이트 시작
-    // RCLCPP_WARN(node_->get_logger(), "🔄 [활성 윈도우 업데이트] 시작 - 현재 위치(%.2f, %.2f, %.2f)", 
-    //            current_pose.x, current_pose.y, current_pose.z);
-    
     // 공간 쿼리로 현재 위치 주변의 키프레임 로드
     std::vector<int> nearby_keyframes = loadKeyFramesByRadius(
         current_pose, 
@@ -624,10 +624,60 @@ void DBManager::updateActiveWindow(const PointTypePose& current_pose) {
     
     std::lock_guard<std::mutex> lock(mutex_);
     
+    // 새로 로드된 키프레임 수 계산 (활성 윈도우 변경 추적)
+    int new_keyframes = 0;
+    for (int id : nearby_keyframes) {
+        if (std::find(active_keyframe_ids_.begin(), active_keyframe_ids_.end(), id) == active_keyframe_ids_.end()) {
+            new_keyframes++;
+        }
+    }
+    
     // 활성 키프레임 목록 업데이트
     active_keyframe_ids_ = nearby_keyframes;
     
-    // 활성 키프레임에 없는 클라우드는 캐시에서 제거
+    // 메모리 상태 로깅
+    size_t memory_usage = 0;
+    for (const auto& pair : cloud_cache_) {
+        if (pair.second) {
+            memory_usage += pair.second->size() * sizeof(PointType);
+        }
+    }
+    
+    // 통계 로깅 - 5초마다 출력
+    static auto last_log_time = std::chrono::steady_clock::now();
+    auto current_time = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(current_time - last_log_time).count() >= 5) {
+        size_t total_points = 0;
+        for (const auto& pair : cloud_cache_) {
+            if (pair.second) {
+                total_points += pair.second->size();
+            }
+        }
+        
+        // 로그 메시지를 INFO 레벨로 변경하고 요약 정보 제공
+        RCLCPP_INFO(node_->get_logger(), "메모리 캐시: %zu개의 키프레임, %.2fMB 사용 중 (총 포인트: %zu개)", 
+                   cloud_cache_.size(), 
+                   static_cast<double>(memory_usage) / (1024 * 1024),
+                   total_points);
+                   
+        // 활성 키프레임 목록 로깅 (최대 10개까지만)
+        std::string active_ids = "";
+        int count = 0;
+        for (int id : active_keyframe_ids_) {
+            if (count++ < 10) {
+                active_ids += std::to_string(id) + " ";
+            } else {
+                active_ids += "...";
+                break;
+            }
+        }
+        // RCLCPP_INFO(node_->get_logger(), "활성 키프레임 ID: %s (총 %zu개)", 
+        //             active_ids.c_str(), active_keyframe_ids_.size());
+                    
+        last_log_time = current_time;
+    }
+    
+    // 활성 키프레임에 없는 클라우드는 캐시에서 제거 (모든 클라우드 캐시 제거는 하지 않음)
     std::vector<int> keys_to_remove;
     
     for (const auto& pair : cloud_cache_) {
@@ -637,16 +687,8 @@ void DBManager::updateActiveWindow(const PointTypePose& current_pose) {
         }
     }
     
-    for (int key : keys_to_remove) {
-        cloud_cache_.erase(key);
-    }
-    
     // 메모리 제한 적용
     enforceMemoryLimit();
-    
-    // 로그 추가 - 활성 윈도우 업데이트 완료
-    // RCLCPP_WARN(node_->get_logger(), "✓ [활성 윈도우 업데이트] 완료 - 활성 키프레임: %zu개, 제거된 캐시: %zu개", 
-    //            active_keyframe_ids_.size(), keys_to_remove.size());
 }
 
 void DBManager::startMemoryMonitoring() {
@@ -666,35 +708,93 @@ void DBManager::stopMemoryMonitoring() {
 }
 
 void DBManager::memoryMonitoringThread() {
-    // 5초마다 메모리 제한 검사
+    // 5초마다 메모리 제한 검사 (3초에서 5초로 변경)
     const int check_interval_ms = 5000;
     
+    // 메모리 사용량 로깅 간격 (30초로 늘림)
+    const int log_interval_ms = 30000;
+    auto last_log_time = std::chrono::steady_clock::now();
+    
     while (!stop_thread_) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            enforceMemoryLimit();
+        try {
+            auto current_time = std::chrono::steady_clock::now();
+            bool should_log = std::chrono::duration_cast<std::chrono::milliseconds>(
+                current_time - last_log_time).count() >= log_interval_ms;
+            
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                // 캐시 관리는 매번 수행
+                enforceMemoryLimit();
+                
+                // 로깅은 지정된 간격으로만 수행 (부하 감소)
+                if (should_log) {
+                    try {
+                        printStats();
+                        last_log_time = current_time;
+                    } catch (const std::exception& e) {
+                        RCLCPP_ERROR(node_->get_logger(), "메모리 통계 출력 중 예외 발생: %s", e.what());
+                    }
+                }
+            }
+            
+            // 짧은 간격으로 여러 번 sleep 호출 (중간에 종료 가능하도록)
+            const int sleep_chunk = 500; // 0.5초
+            int remaining = check_interval_ms;
+            while (remaining > 0 && !stop_thread_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(std::min(sleep_chunk, remaining)));
+                remaining -= sleep_chunk;
+            }
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(node_->get_logger(), "메모리 모니터링 스레드에서 예외 발생: %s", e.what());
+            // 짧은 대기 후 계속 실행
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         }
-        
-        // 메모리 사용량 출력 (매 10번째 반복마다)
-        static int counter = 0;
-        if (++counter % 10 == 0) {
-            printStats();
-        }
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms));
     }
 }
 
 void DBManager::enforceMemoryLimit() {
-    // 메모리 제한 적용
+    // active_keyframe_ids_가 비어 있거나 max_memory_keyframes_가 0 이하이면 제한 적용 안함
+    if (active_keyframe_ids_.empty() || max_memory_keyframes_ <= 0) {
+        return;
+    }
+    
+    // 특수 케이스: 활성 키프레임 수가 메모리 제한보다 많은 경우
+    // 이 경우 활성 키프레임만 유지하고 나머지는 제거
+    if (active_keyframe_ids_.size() > static_cast<size_t>(max_memory_keyframes_)) {
+        // 활성 키프레임만 유지하고 나머지 제거
+        std::unordered_map<int, pcl::PointCloud<PointType>::Ptr> new_cache;
+        
+        // 가장 최근 max_memory_keyframes_ 개의 활성 키프레임만 유지
+        size_t start_idx = active_keyframe_ids_.size() - max_memory_keyframes_;
+        for (size_t i = start_idx; i < active_keyframe_ids_.size(); i++) {
+            int key = active_keyframe_ids_[i];
+            auto it = cloud_cache_.find(key);
+            if (it != cloud_cache_.end()) {
+                new_cache[key] = it->second;
+            }
+        }
+        
+        // 제거된 키프레임 수 계산
+        int removed_count = cloud_cache_.size() - new_cache.size();
+        
+        // 캐시 교체
+        cloud_cache_ = std::move(new_cache);
+        
+        // INFO 레벨로 변경하고 메시지 간결화
+        // if (removed_count > 0) {
+        //     RCLCPP_INFO(node_->get_logger(), "메모리 정리: %d개 키프레임 제거됨, 현재 캐시 크기: %zu", 
+        //               removed_count, cloud_cache_.size());
+        // }
+        return;
+    }
+    
+    // 일반 케이스: 캐시 크기가 제한을 초과하면 비활성 키프레임부터 제거
     if (cloud_cache_.size() <= static_cast<size_t>(max_memory_keyframes_)) {
         return;
     }
     
-    // 캐시 크기가 제한을 초과하면 LRU 방식으로 제거
-    // active_keyframe_ids_에 없는 항목부터 제거
+    // 비활성 키 식별
     std::vector<int> non_active_keys;
-    
     for (const auto& pair : cloud_cache_) {
         int keyframe_id = pair.first;
         if (std::find(active_keyframe_ids_.begin(), active_keyframe_ids_.end(), keyframe_id) == active_keyframe_ids_.end()) {
@@ -706,40 +806,151 @@ void DBManager::enforceMemoryLimit() {
     int num_to_remove = cloud_cache_.size() - max_memory_keyframes_;
     
     // 비활성 키를 먼저 제거
+    int removed_count = 0;
     for (int i = 0; i < std::min(num_to_remove, static_cast<int>(non_active_keys.size())); ++i) {
         cloud_cache_.erase(non_active_keys[i]);
+        removed_count++;
     }
     
-    // 비활성 키를 모두 제거해도 여전히 제한을 초과하면 활성 키에서도 제거
+    // 제거 로그 추가 (INFO 레벨로 변경)
+    // if (removed_count > 0) {
+    //     RCLCPP_INFO(node_->get_logger(), "메모리 정리: %d개 키프레임 제거됨, 현재 캐시 크기: %zu", 
+    //                removed_count, cloud_cache_.size());
+    // }
+    
+    // 비활성 키를 모두 제거해도 여전히 제한을 초과하는 특수한 경우
+    // 이 경우 시스템이 루프 클로저와 같은 중요 작업을 수행 중일 수 있으므로
+    // 활성 키는 최대한 유지하고 로그만 출력
     if (cloud_cache_.size() > static_cast<size_t>(max_memory_keyframes_)) {
-        num_to_remove = cloud_cache_.size() - max_memory_keyframes_;
-        
-        // 가장 오래된 활성 키프레임부터 제거
-        for (int i = 0; i < std::min(num_to_remove, static_cast<int>(active_keyframe_ids_.size())); ++i) {
-            // 가장 오래된 항목은 리스트의 앞쪽에 있음
-            cloud_cache_.erase(active_keyframe_ids_[i]);
-        }
+        RCLCPP_WARN(node_->get_logger(), "메모리 제한 초과: 캐시=%zu, 제한=%d, 활성 키프레임=%zu", 
+                  cloud_cache_.size(), max_memory_keyframes_, active_keyframe_ids_.size());
     }
 }
 
 void DBManager::printStats() {
     if (!initialized_) return;
     
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    // 키프레임 수 조회
-    int total_keyframes = getNumKeyFrames();
-    
-    // 메모리 사용량 계산 (대략적인 추정)
-    size_t memory_usage = 0;
-    for (const auto& pair : cloud_cache_) {
-        if (pair.second) {
-            memory_usage += pair.second->size() * sizeof(PointType);
+    try {
+        // 키프레임 수 조회
+        int total_keyframes = getNumKeyFrames();
+        
+        // 메모리 사용량 계산 (대략적인 추정)
+        size_t memory_usage = 0;
+        size_t total_points = 0;
+        for (const auto& pair : cloud_cache_) {
+            if (pair.second) {
+                memory_usage += pair.second->size() * sizeof(PointType);
+                total_points += pair.second->size();
+            }
         }
+        
+        // 시스템 메모리 사용량 확인 - 간소화된 로깅을 위해 필수 정보만 가져오기
+        std::map<std::string, size_t> process_memory = getProcessMemoryUsage();
+        
+        // 필수 통계 정보만 출력 (로그 양 감소)
+        RCLCPP_INFO(node_->get_logger(), "메모리 상태: 캐시=%zu/총=%d 키프레임, 메모리=%.2f MB, RSS=%.2f MB, VSZ=%.2f MB",
+                   cloud_cache_.size(), total_keyframes,
+                   memory_usage / (1024.0 * 1024.0),
+                   process_memory["VmRSS"] / (1024.0 * 1024.0),
+                   process_memory["VmSize"] / (1024.0 * 1024.0));
+        
+        // 자세한 로그는 DEBUG 레벨로 변경 (INFO 레벨 로그 감소)
+        // 단, 디버그 로그는 기본적으로 비활성화
+        RCLCPP_DEBUG(node_->get_logger(), "자세한 메모리: 데이터=%.2f MB, 스택=%.2f MB, 최대 RSS=%.2f MB",
+                   process_memory["VmData"] / (1024.0 * 1024.0),
+                   process_memory["VmStk"] / (1024.0 * 1024.0),
+                   process_memory["VmHWM"] / (1024.0 * 1024.0));
+        
+        // 활성 키프레임 목록 로깅 (최대 5개까지만) - DEBUG 레벨로 변경
+        std::string active_ids = "";
+        int count = 0;
+        for (int id : active_keyframe_ids_) {
+            if (count++ < 5) {
+                active_ids += std::to_string(id) + " ";
+            } else {
+                active_ids += "...";
+                break;
+            }
+        }
+        RCLCPP_DEBUG(node_->get_logger(), "활성 키프레임 ID: %s (총 %zu개)", 
+                    active_ids.c_str(), active_keyframe_ids_.size());
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "통계 정보 계산 중 오류 발생: %s", e.what());
+    }
+}
+
+// 시스템 메모리 사용량을 확인하는 함수 추가
+std::map<std::string, size_t> DBManager::getProcessMemoryUsage() {
+    std::map<std::string, size_t> result;
+    result["VmRSS"] = 0;   // 물리적 메모리 사용량 (Resident Set Size)
+    result["VmSize"] = 0;  // 가상 메모리 크기 (Virtual Memory Size)
+    result["VmData"] = 0;  // 데이터 세그먼트 크기
+    result["VmStk"] = 0;   // 스택 크기
+    result["VmPeak"] = 0;  // 최대 가상 메모리 사용량
+    result["VmHWM"] = 0;   // 최대 상주 메모리 사용량 (High Water Mark)
+    
+    try {
+        // /proc/self/status 파일에서 메모리 정보 읽기
+        std::ifstream status_file("/proc/self/status");
+        if (!status_file.is_open()) {
+            RCLCPP_WARN(node_->get_logger(), "프로세스 메모리 정보를 읽을 수 없습니다");
+            return result;
+        }
+        
+        std::string line;
+        while (std::getline(status_file, line)) {
+            try {
+                // 필요한 메모리 정보만 처리
+                if (line.find("VmRSS:") != std::string::npos || 
+                    line.find("VmSize:") != std::string::npos ||
+                    line.find("VmData:") != std::string::npos ||
+                    line.find("VmStk:") != std::string::npos ||
+                    line.find("VmPeak:") != std::string::npos ||
+                    line.find("VmHWM:") != std::string::npos) {
+                    
+                    std::istringstream iss(line);
+                    std::string key, value, unit;
+                    iss >> key >> value >> unit;
+                    
+                    // 잘못된 형식이면 건너뛰기
+                    if (key.empty() || value.empty()) continue;
+                    
+                    // 숫자가 아닌 값이면 건너뛰기
+                    for (char c : value) {
+                        if (!std::isdigit(c)) {
+                            continue;
+                        }
+                    }
+                    
+                    // 단위 변환 (kB를 바이트로)
+                    size_t memory_value = 0;
+                    try {
+                        memory_value = std::stoul(value);
+                        if (unit == "kB") {
+                            memory_value *= 1024; // kB -> bytes
+                        }
+                    } catch (const std::exception& e) {
+                        continue; // 변환 실패 시 건너뛰기
+                    }
+                    
+                    // 콜론 제거
+                    if (!key.empty() && key.back() == ':') {
+                        key.pop_back();
+                    }
+                    result[key] = memory_value;
+                }
+            } catch (const std::exception& e) {
+                // 라인 파싱 중 예외 발생 시 다음 라인으로 계속
+                continue;
+            }
+        }
+        status_file.close();
+    } catch (const std::exception& e) {
+        // 전체 함수에서 예외 발생 시 안전하게 기본값 반환
+        RCLCPP_ERROR(node_->get_logger(), "메모리 정보 읽기 중 예외 발생: %s", e.what());
     }
     
-    RCLCPP_INFO(node_->get_logger(), "DB 통계: 총 키프레임=%d, 메모리 캐시=%zu, 활성 키프레임=%zu, 메모리 사용=%.2f MB",
-               total_keyframes, cloud_cache_.size(), active_keyframe_ids_.size(), memory_usage / (1024.0 * 1024.0));
+    return result;
 }
 
 int DBManager::getNumKeyFrames() const {

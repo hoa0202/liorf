@@ -97,6 +97,9 @@ public:
     const std::vector<gtsam::Pose3>& getLoopPoseQueue() const { return loopPoseQueue; }
     const std::vector<gtsam::SharedNoiseModel>& getLoopNoiseQueue() const { return loopNoiseQueue; }
 
+    // 메모리 관리 함수 추가
+    void clearTemporaryCache();
+
 private:
     rclcpp::Node* node_;
     std::unique_ptr<SCManager> sc_manager_; // Scan Context 관리자
@@ -146,6 +149,9 @@ private:
     
     // DB 모드용 헬퍼 함수
     pcl::PointCloud<PointType>::Ptr getKeyFrameFromDB(int keyframe_id);
+    
+    // 임시 클라우드 캐시 추가 - 루프 클로저 작업 중에만 사용
+    std::unordered_map<int, pcl::PointCloud<PointType>::Ptr> tempCloudCache;
 };
 
 #endif // LOOPCLOSURE_H 
