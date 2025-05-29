@@ -81,6 +81,25 @@ using namespace std;
 
 typedef pcl::PointXYZI PointType;
 
+// PointTypePose 구조체 정의 추가
+struct PointTypePose
+{
+    PCL_ADD_POINT4D
+    PCL_ADD_INTENSITY;
+    float roll;
+    float pitch;
+    float yaw;
+    float time;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
+
+POINT_CLOUD_REGISTER_POINT_STRUCT (PointTypePose,
+                                   (float, x, x) (float, y, y)
+                                   (float, z, z) (float, intensity, intensity)
+                                   (float, roll, roll) (float, pitch, pitch) (float, yaw, yaw)
+                                   (float, time, time)
+)
+
 // <!-- liorf_localization_yjz_lucky_boy -->
 extern std::shared_ptr<CommonLib::common_lib> common_lib_;
 

@@ -4,6 +4,7 @@
 #include "utility.h"
 #include "Scancontext.h"
 #include "costmap.h"
+#include "db_manager.h"
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -52,23 +53,30 @@ void PublishCloudMsg(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Sha
 class LoopClosure
 {
 public:
-    // 수정된 생성자 - 파라미터를 명시적으로 받음
+    // 수정된 생성자 - DB 관리자 추가
     LoopClosure(rclcpp::Node* node, 
                 double historyKeyframeSearchRadius,
                 int historyKeyframeSearchNum,
                 double historyKeyframeSearchTimeDiff,
-                double historyKeyframeFitnessScore);
+                double historyKeyframeFitnessScore,
+                DBManager* db_manager = nullptr);
     ~LoopClosure();
     
     // 루프 클로저 스레드 함수
     void loopClosureThread();
     
-    // 데이터 설정 함수
+    // 데이터 설정 함수 - DB 모드 지원 추가
     void setInputData(pcl::PointCloud<PointType>::Ptr& keyPoses3D, 
                      pcl::PointCloud<PointTypePose>::Ptr& keyPoses6D,
                      std::vector<pcl::PointCloud<PointType>::Ptr>& surfKeyFrames,
                      double currentTimestamp,
                      pcl::PointCloud<PointType>::Ptr currentScan = nullptr);
+    
+    // DB 모드용 데이터 설정 함수 추가
+    void setInputDataWithDB(pcl::PointCloud<PointType>::Ptr& keyPoses3D, 
+                           pcl::PointCloud<PointTypePose>::Ptr& keyPoses6D, 
+                           double currentTimestamp,
+                           pcl::PointCloud<PointType>::Ptr currentScan = nullptr);
     
     // 루프 감지 및 처리
     void loopInfoHandler(const std_msgs::msg::Float64MultiArray::SharedPtr loopMsg);
@@ -89,9 +97,23 @@ public:
     const std::vector<gtsam::Pose3>& getLoopPoseQueue() const { return loopPoseQueue; }
     const std::vector<gtsam::SharedNoiseModel>& getLoopNoiseQueue() const { return loopNoiseQueue; }
 
+    // 메모리 관리 함수 추가
+    void clearTemporaryCache();
+    
+    // DB 모드 기능 추가
+    void saveLoopFeatureToDB(int feature_id, pcl::PointCloud<PointType>::Ptr cloud);
+    pcl::PointCloud<PointType>::Ptr loadLoopFeatureFromDB(int feature_id);
+    void updateActiveLoopFeatureWindow(const PointTypePose& current_pose);
+    
+    // DB 설정 함수
+    void setDBMode(bool use_db) { use_db_mode_ = use_db; }
+    bool isUsingDBMode() const { return use_db_mode_; }
+
 private:
     rclcpp::Node* node_;
     std::unique_ptr<SCManager> sc_manager_; // Scan Context 관리자
+    DBManager* db_manager_; // DB 관리자 참조 추가 (소유권 없음)
+    bool use_db_mode_; // DB 모드 사용 여부
     
     // Loop Closure 관련 변수
     pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D;
@@ -133,6 +155,12 @@ private:
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubLoopConstraintEdge;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubHistoryKeyFrames;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubIcpKeyFrames;
+    
+    // DB 모드용 헬퍼 함수
+    pcl::PointCloud<PointType>::Ptr getKeyFrameFromDB(int keyframe_id);
+    
+    // 임시 클라우드 캐시 추가 - 루프 클로저 작업 중에만 사용
+    std::unordered_map<int, pcl::PointCloud<PointType>::Ptr> tempCloudCache;
 };
 
 #endif // LOOPCLOSURE_H 

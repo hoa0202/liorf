@@ -3,7 +3,9 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, Command
+from launch.conditions import IfCondition
 from launch_ros.actions import Node
+from launch.actions import ExecuteProcess
 
 
 def generate_launch_description():
@@ -11,6 +13,9 @@ def generate_launch_description():
     share_dir = get_package_share_directory('liorf')
     parameter_file = LaunchConfiguration('params_file')
     rviz_config_file = os.path.join(share_dir, 'rviz', 'mapping.rviz')
+
+    # 로그 레벨 설정
+    log_level = LaunchConfiguration('log_level', default='info')
 
     params_declare = DeclareLaunchArgument(
         'params_file',
@@ -68,6 +73,7 @@ def generate_launch_description():
             executable='liorf_imuPreintegration',
             name='liorf_imuPreintegration',
             parameters=[parameter_file],
+            arguments=['--ros-args', '--log-level', [log_level]],
             output='screen'
         ),
         Node(
@@ -75,8 +81,9 @@ def generate_launch_description():
             executable='liorf_imageProjection',
             name='liorf_imageProjection',
             parameters=[parameter_file,
-                    {'use_livox_data': True,
-                    'livox_time_field': 'offset_time'}],
+                   {'use_livox_data': True,
+                   'livox_time_field': 'offset_time'}],
+            arguments=['--ros-args', '--log-level', [log_level]],
             output='screen'
         ),
         # Node(
@@ -91,17 +98,24 @@ def generate_launch_description():
             executable='liorf_mapOptmization',
             name='liorf_mapOptmization',
             parameters=[parameter_file, {
-                'costmap_resolution': 0.1,        # 격자 해상도 (m)
-                'costmap_width': 1.0, # 수정금지 1.0 고정           # 초기 맵 폭 (m)
-                'costmap_height': 1.0, # 수정금지 1.0 고정           # 초기 맵 높이 (m)
-                'min_height_threshold': 0.15,      # 포인트 클라우드 최소 높이 임계값 (m)
-                'max_height_threshold': 1.1,      # 포인트 클라우드 최대 높이 임계값 (m) - 2.0보다 더 높게 설정
-                'obstacle_threshold': 2,          # 장애물로 판단할 최소 포인트 수 - 민감도 높임
-                'point_threshold': 1,             # 그리드 셀 처리를 위한 최소 포인트 수
-                'height_diff_threshold': 0.01,     # 장애물 판단 높이 차이 임계값 (m)
-                'base_frame_id': 'base_link',     # 베이스 프레임 ID
-                'auto_resize_map': True           # 맵 자동 크기 조정 활성화
-            }],
+               'costmap_resolution': 0.1,        # 격자 해상도 (m)
+               'costmap_width': 1.0, # 수정금지 1.0 고정           # 초기 맵 폭 (m)
+               'costmap_height': 1.0, # 수정금지 1.0 고정           # 초기 맵 높이 (m)
+               'min_height_threshold': 0.15,      # 포인트 클라우드 최소 높이 임계값 (m)
+               'max_height_threshold': 1.1,      # 포인트 클라우드 최대 높이 임계값 (m) - 2.0보다 더 높게 설정
+               'obstacle_threshold': 2,          # 장애물로 판단할 최소 포인트 수 - 민감도 높임
+               'point_threshold': 1,             # 그리드 셀 처리를 위한 최소 포인트 수
+               'height_diff_threshold': 0.01,     # 장애물 판단 높이 차이 임계값 (m)
+               'base_frame_id': 'base_link',     # 베이스 프레임 ID
+               'auto_resize_map': True,          # 맵 자동 크기 조정 활성화
+               'use_database_mode': True,
+               'database_path': '/root/liorf_ws2/src/liorf/maps/slam_map.db', # 경로 수정금지 /root/liorf_ws2/src/liorf/maps/slam_map.db 고정
+               'clouds_directory': '/root/liorf_ws2/src/liorf/maps/clouds', # 경로 수정금지 /root/liorf_ws2/src/liorf/maps/clouds 고정
+               'active_keyframes_window_size': 100,
+               'active_loop_features_window_size' : 100,
+               'spatial_query_radius': 10.0
+           }],
+            arguments=['--ros-args', '--log-level', [log_level]],
             output='screen'
         ),
         Node(

@@ -3,6 +3,7 @@
 #include "utility.h"
 #include "costmap.h" // 코스트맵 생성기 클래스 헤더 추가
 #include "loopclosure.h" // Loop Closure 클래스 헤더 추가
+#include "db_manager.h" // 데이터베이스 관리자 헤더 추가
 #include "liorf/msg/cloud_info.hpp"
 #include "liorf/srv/save_map.hpp"
 // <!-- liorf_yjz_lucky_boy -->
@@ -146,6 +147,14 @@ public:
     // Loop Closure 관련 변수
     std::unique_ptr<LoopClosure> loop_closure_; // 루프 클로저 모듈
 
+    // 데이터베이스 관련 변수
+    std::unique_ptr<DBManager> db_manager_; // 데이터베이스 관리자
+    bool use_database_mode_; // 데이터베이스 모드 활성화 여부
+    bool localization_mode_; // 로컬라이제이션 모드 여부
+    int active_keyframes_window_size_; // 메모리에 유지할 키프레임 수
+    int active_loop_features_window_size_; // 메모리에 유지할 루프 특징점 수
+    double spatial_query_radius_; // 공간 쿼리 반경
+
     mapOptimization(const rclcpp::NodeOptions & options);
 
     void allocateMemory();
@@ -185,6 +194,11 @@ public:
     void publishFrames();
     void updateMapSize(const pcl::PointCloud<PointType>::Ptr& cloud);
     void clearOldFrames();
+
+    // 데이터베이스 관련 함수
+    void initializeDBManager();
+    void loadKeyFramesFromDB();
+    void updateActiveWindow(const PointTypePose& current_pose);
 };
 
 int main(int argc, char** argv); 
