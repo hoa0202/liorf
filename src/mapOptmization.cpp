@@ -96,42 +96,35 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
         RCLCPP_INFO(this->get_logger(), "Costmap integration initialized with resolution: %.2f, size: %.1fm x %.1fm, origin: (%.2f, %.2f)",
                    costmap_resolution, costmap_width, costmap_height, -costmap_width/2, -costmap_height/2);
 
-        // 데이터베이스 관리자 초기화
+        // 데이터베이스 관련 기능 초기화
         use_database_mode_ = this->declare_parameter<bool>("use_database_mode", false);
+        localization_mode_ = this->declare_parameter<bool>("localization_mode", false);  // 로컬라이제이션 모드 파라미터 추가
         active_keyframes_window_size_ = this->declare_parameter<int>("active_keyframes_window_size", 100);
-        spatial_query_radius_ = this->declare_parameter<double>("spatial_query_radius", 50.0);
-        std::string db_path = this->declare_parameter<std::string>("database_path", "slam_map.db");
-        std::string clouds_directory = this->declare_parameter<std::string>("clouds_directory", "");
-        bool database_reset_on_start = this->declare_parameter<bool>("database_reset_on_start", false);
+        active_loop_features_window_size_ = this->declare_parameter<int>("active_loop_features_window_size", 100);
+        spatial_query_radius_ = this->declare_parameter<double>("spatial_query_radius", 10.0);
         
         if (use_database_mode_) {
+            RCLCPP_INFO(this->get_logger(), "데이터베이스 모드 활성화: %s", 
+                       localization_mode_ ? "로컬라이제이션 모드" : "매핑 모드");
+            
             try {
-                RCLCPP_INFO(this->get_logger(), "데이터베이스 모드 활성화: %s", db_path.c_str());
-                if (!clouds_directory.empty()) {
-                    RCLCPP_INFO(this->get_logger(), "포인트 클라우드 디렉토리: %s", clouds_directory.c_str());
-                }
+                // 데이터베이스 경로 및 설정 가져오기
+                std::string db_path = this->declare_parameter<std::string>("database_path", "");
+                std::string clouds_directory = this->declare_parameter<std::string>("clouds_directory", "");
+                bool database_reset_on_start = this->declare_parameter<bool>("database_reset_on_start", true);
                 
-                // SQLite 라이브러리 버전 확인
-                RCLCPP_INFO(this->get_logger(), "SQLite 버전: %s", sqlite3_libversion());
-                
-                // 상대 경로를 절대 경로로 변환 (이중 처리를 위한 안전장치)
+                // 절대 경로 변환
                 if (!db_path.empty() && db_path[0] != '/') {
-                    // 상대 경로는 현재 패키지 디렉토리 기준으로 처리
-                    char cwd[1024];
-                    if (getcwd(cwd, sizeof(cwd)) != NULL) {
-                        RCLCPP_INFO(this->get_logger(), "현재 작업 디렉토리: %s", cwd);
-                        // 상대 경로일 경우 절대 경로로 변환
-                        if (db_path.find("~/") == 0) {
-                            // ~/ 로 시작하는 경로는 홈 디렉토리로 변환
-                            db_path = std::string(std::getenv("HOME")) + db_path.substr(1);
-                        } else if (db_path[0] != '/') {
-                            // 절대 경로가 아니면 현재 디렉토리 기준으로 처리
+                    if (db_path.find("~/") == 0) {
+                        db_path = std::string(std::getenv("HOME")) + db_path.substr(1);
+                    } else {
+                        char cwd[1024];
+                        if (getcwd(cwd, sizeof(cwd)) != NULL) {
                             db_path = std::string(cwd) + "/" + db_path;
                         }
                     }
                 }
                 
-                // 클라우드 디렉토리도 동일하게 처리
                 if (!clouds_directory.empty() && clouds_directory[0] != '/') {
                     if (clouds_directory.find("~/") == 0) {
                         clouds_directory = std::string(std::getenv("HOME")) + clouds_directory.substr(1);
@@ -146,6 +139,10 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
                 RCLCPP_INFO(this->get_logger(), "최종 데이터베이스 경로: %s", db_path.c_str());
                 RCLCPP_INFO(this->get_logger(), "최종 클라우드 디렉토리: %s", clouds_directory.c_str());
                 RCLCPP_INFO(this->get_logger(), "데이터베이스 초기화 모드: %s", database_reset_on_start ? "완전 초기화" : "연속 매핑");
+                RCLCPP_INFO(this->get_logger(), "메모리 키프레임 제한: %d, 메모리 루프 특징점 제한: %d", 
+                           active_keyframes_window_size_, active_loop_features_window_size_);
+                RCLCPP_INFO(this->get_logger(), "공간 쿼리 반경: %.2f", spatial_query_radius_);
+                RCLCPP_INFO(this->get_logger(), "로컬라이제이션 모드: %s", localization_mode_ ? "활성화" : "비활성화");
                 
                 db_manager_ = std::make_unique<DBManager>(
                     this,
@@ -153,8 +150,14 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
                     active_keyframes_window_size_,
                     spatial_query_radius_,
                     clouds_directory,
-                    database_reset_on_start
+                    database_reset_on_start,
+                    localization_mode_  // 로컬라이제이션 모드 전달
                 );
+                
+                // 루프 특징점 메모리 제한 설정
+                if (db_manager_) {
+                    db_manager_->setMaxMemoryLoopFeatures(active_loop_features_window_size_);
+                }
                 
                 if (!db_manager_->initialize()) {
                     RCLCPP_ERROR(this->get_logger(), "데이터베이스 초기화 실패, 데이터베이스 모드 비활성화");
@@ -197,6 +200,12 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
         historyKeyframeFitnessScore,
         use_database_mode_ ? db_manager_.get() : nullptr  // DB 관리자 전달
     );
+    
+    // DB 모드 설정
+    if (loop_closure_) {
+        loop_closure_->setDBMode(use_database_mode_);
+        RCLCPP_INFO(this->get_logger(), "Loop Closure 모듈 DB 모드: %s", use_database_mode_ ? "활성화" : "비활성화");
+    }
 }
 
 void mapOptimization::allocateMemory()
@@ -1183,6 +1192,11 @@ void mapOptimization::clearOldFrames()
         // 현재 위치 기준으로 필요한 키프레임만 메모리에 유지
         PointTypePose currentPose = cloudKeyPoses6D->back();
         db_manager_->updateActiveWindow(currentPose);
+        
+        // 루프 특징점 활성 윈도우도 업데이트
+        if (loop_closure_) {
+            loop_closure_->updateActiveLoopFeatureWindow(currentPose);
+        }
     }
 }
 

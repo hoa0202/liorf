@@ -5,14 +5,17 @@ DBManager::DBManager(rclcpp::Node* node,
                      int max_memory_keyframes,
                      double spatial_query_radius,
                      const std::string& clouds_directory,
-                     bool reset_on_start)
+                     bool reset_on_start,
+                     bool localization_mode)
     : node_(node), 
       max_memory_keyframes_(max_memory_keyframes),
+      max_memory_loop_features_(max_memory_keyframes), // 루프 특징점 메모리 제한을 키프레임과 동일하게 설정
       spatial_query_radius_(spatial_query_radius),
       db_(nullptr), 
       initialized_(false),
       stop_thread_(false),
-      reset_on_start_(reset_on_start)
+      reset_on_start_(reset_on_start),
+      localization_mode_(localization_mode)
 {
     // 상대 경로인 경우 절대 경로로 변환
     if (db_path.empty()) {
@@ -28,10 +31,13 @@ DBManager::DBManager(rclcpp::Node* node,
     // 클라우드 디렉토리 경로도 같은 방식으로 처리
     if (clouds_directory.empty()) {
         clouds_directory_ = std::string(std::getenv("HOME")) + "/liorf_maps/clouds";
+        loop_features_directory_ = std::string(std::getenv("HOME")) + "/liorf_maps/loop_features";
     } else if (clouds_directory[0] != '/') {
         clouds_directory_ = std::string(std::getenv("HOME")) + "/" + clouds_directory;
+        loop_features_directory_ = std::string(std::getenv("HOME")) + "/" + clouds_directory + "_loop";
     } else {
         clouds_directory_ = clouds_directory;
+        loop_features_directory_ = clouds_directory + "_loop";
     }
     
     // DB 저장 디렉토리 생성
@@ -42,16 +48,21 @@ DBManager::DBManager(rclcpp::Node* node,
     
     // PCD 파일 저장할 디렉토리 생성
     createDirectoryIfNotExists(clouds_directory_);
+    createDirectoryIfNotExists(loop_features_directory_);
     
     RCLCPP_INFO(node_->get_logger(), "DBManager 초기화: 데이터베이스 경로 = %s", db_path_.c_str());
     RCLCPP_INFO(node_->get_logger(), "포인트 클라우드 저장 경로 = %s", clouds_directory_.c_str());
+    RCLCPP_INFO(node_->get_logger(), "루프 특징점 저장 경로 = %s", loop_features_directory_.c_str());
     
     // 메모리 제한 로그 - 일관된 형식 유지
-    RCLCPP_INFO(node_->get_logger(), "메모리 키프레임 제한: %d, 공간 쿼리 반경: %.2f", 
-               max_memory_keyframes_, spatial_query_radius_);
+    RCLCPP_INFO(node_->get_logger(), "메모리 키프레임 제한: %d, 메모리 루프 특징점 제한: %d, 공간 쿼리 반경: %.2f", 
+               max_memory_keyframes_, max_memory_loop_features_, spatial_query_radius_);
                
     RCLCPP_INFO(node_->get_logger(), "시작 시 데이터베이스 초기화: %s", 
                reset_on_start_ ? "활성화 (완전 초기화 모드)" : "비활성화 (연속 매핑 모드)");
+               
+    RCLCPP_INFO(node_->get_logger(), "로컬라이제이션 모드: %s", 
+               localization_mode_ ? "활성화 (데이터베이스 보존)" : "비활성화 (일반 매핑 모드)");
 }
 
 DBManager::~DBManager() {
@@ -153,6 +164,12 @@ bool DBManager::initialize() {
 bool DBManager::resetDatabase() {
     RCLCPP_INFO(node_->get_logger(), "데이터베이스 초기화 진행 중...");
     
+    // 로컬라이제이션 모드 확인 (localization_mode_ 변수 사용)
+    if (localization_mode_) {
+        RCLCPP_INFO(node_->get_logger(), "로컬라이제이션 모드에서는 데이터베이스와 PCD 파일을 보존합니다.");
+        return true;
+    }
+    
     // SQLite 데이터베이스 파일 삭제
     bool success = true;
     if (std::filesystem::exists(db_path_)) {
@@ -212,9 +229,27 @@ bool DBManager::resetDatabase() {
                     deleted_count++;
                 }
             }
-            RCLCPP_INFO(node_->get_logger(), "총 %d개의 PCD 파일 삭제 완료", deleted_count);
+            RCLCPP_INFO(node_->get_logger(), "총 %d개의 키프레임 PCD 파일 삭제 완료", deleted_count);
         } catch (const std::exception& e) {
-            RCLCPP_ERROR(node_->get_logger(), "PCD 파일 삭제 예외: %s", e.what());
+            RCLCPP_ERROR(node_->get_logger(), "키프레임 PCD 파일 삭제 예외: %s", e.what());
+            success = false;
+        }
+    }
+    
+    // 루프 클로저 특징점 디렉토리 내의 모든 PCD 파일 삭제 (추가된 부분)
+    if (std::filesystem::exists(loop_features_directory_)) {
+        try {
+            RCLCPP_INFO(node_->get_logger(), "루프 특징점 디렉토리 내 PCD 파일 삭제 중: %s", loop_features_directory_.c_str());
+            int deleted_count = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(loop_features_directory_)) {
+                if (entry.path().extension() == ".pcd") {
+                    std::filesystem::remove(entry.path());
+                    deleted_count++;
+                }
+            }
+            RCLCPP_INFO(node_->get_logger(), "총 %d개의 루프 특징점 PCD 파일 삭제 완료", deleted_count);
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(node_->get_logger(), "루프 특징점 PCD 파일 삭제 예외: %s", e.what());
             success = false;
         }
     }
@@ -239,6 +274,32 @@ bool DBManager::createTables() {
     
     // 공간 인덱스 생성 (R-Tree는 SQLite 3.8.0 이상 지원)
     sql = "CREATE VIRTUAL TABLE IF NOT EXISTS keyframes_rtree USING rtree("
+          "id, "          // ID
+          "min_x, max_x, " // X 범위
+          "min_y, max_y, " // Y 범위
+          "min_z, max_z"   // Z 범위
+          ");";
+    
+    if (!executeSql(sql)) {
+        return false;
+    }
+    
+    // 루프 특징점 테이블 생성
+    sql = "CREATE TABLE IF NOT EXISTS loop_features ("
+          "id INTEGER PRIMARY KEY, "
+          "timestamp REAL, "
+          "x REAL, y REAL, z REAL, "
+          "roll REAL, pitch REAL, yaw REAL, "
+          "cloud_file TEXT, "
+          "num_points INTEGER"
+          ");";
+    
+    if (!executeSql(sql)) {
+        return false;
+    }
+    
+    // 루프 특징점 공간 인덱스 생성
+    sql = "CREATE VIRTUAL TABLE IF NOT EXISTS loop_features_rtree USING rtree("
           "id, "          // ID
           "min_x, max_x, " // X 범위
           "min_y, max_y, " // Y 범위
@@ -491,67 +552,66 @@ bool DBManager::deleteKeyFrame(int keyframe_id) {
     return true;
 }
 
-std::vector<int> DBManager::loadKeyFramesByRadius(const PointTypePose& current_pose, 
+std::vector<int> DBManager::loadKeyFramesByRadius(const PointTypePose& current_pose,
                                                  double radius, 
                                                  int max_keyframes) {
-    if (!initialized_) {
-        RCLCPP_ERROR(node_->get_logger(), "데이터베이스 초기화되지 않음");
-        return {};
-    }
-    
     std::lock_guard<std::mutex> lock(mutex_);
     
-    std::vector<int> result;
+    std::vector<int> keyframe_ids;
     
-    // R-tree를 사용한 공간 쿼리
-    // RCLCPP_INFO(node_->get_logger(), "DB에서 반경 %.2f 내의 키프레임 검색 중", radius);
-    
-    std::string sql = "SELECT k.id FROM keyframes k "
-                      "JOIN keyframes_rtree r ON k.id = r.id "
-                      "WHERE r.min_x <= ? AND r.max_x >= ? "
-                      "AND r.min_y <= ? AND r.max_y >= ? "
-                      "AND r.min_z <= ? AND r.max_z >= ? "
-                      "ORDER BY (k.x - ?)*(k.x - ?) + (k.y - ?)*(k.y - ?) + (k.z - ?)*(k.z - ?) ASC "
-                      "LIMIT ?;";
-    
-    sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        RCLCPP_ERROR(node_->get_logger(), "SQL 준비 실패: %s", sqlite3_errmsg(db_));
-        return result;
+    if (!initialized_) {
+        RCLCPP_ERROR(node_->get_logger(), "데이터베이스가 초기화되지 않았습니다");
+        return keyframe_ids;
     }
     
-    // 공간 검색 범위 설정
-    sqlite3_bind_double(stmt, 1, current_pose.x + radius);
-    sqlite3_bind_double(stmt, 2, current_pose.x - radius);
-    sqlite3_bind_double(stmt, 3, current_pose.y + radius);
-    sqlite3_bind_double(stmt, 4, current_pose.y - radius);
-    sqlite3_bind_double(stmt, 5, current_pose.z + radius);
-    sqlite3_bind_double(stmt, 6, current_pose.z - radius);
-    
-    // 거리 정렬을 위한 현재 위치
-    sqlite3_bind_double(stmt, 7, current_pose.x);
-    sqlite3_bind_double(stmt, 8, current_pose.x);
-    sqlite3_bind_double(stmt, 9, current_pose.y);
-    sqlite3_bind_double(stmt, 10, current_pose.y);
-    sqlite3_bind_double(stmt, 11, current_pose.z);
-    sqlite3_bind_double(stmt, 12, current_pose.z);
-    
-    // 결과 제한
-    sqlite3_bind_int(stmt, 13, max_keyframes);
-    
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        int keyframe_id = sqlite3_column_int(stmt, 0);
-        result.push_back(keyframe_id);
+    try {
+        // 쿼리 생성 - X-Y 평면 기준으로만 검색 (Z축 무시)
+        char sql[512];
+        sprintf(sql, "SELECT id FROM keyframes_rtree WHERE "
+                     "min_x <= %f AND max_x >= %f AND "
+                     "min_y <= %f AND max_y >= %f "
+                     "ORDER BY (min_x - %f)*(min_x - %f) + (min_y - %f)*(min_y - %f) ASC "  // Z축 무시, X-Y 평면만 고려
+                     "LIMIT %d;",
+                current_pose.x + radius, current_pose.x - radius,
+                current_pose.y + radius, current_pose.y - radius,
+                current_pose.x, current_pose.x, current_pose.y, current_pose.y,
+                max_keyframes);
+        
+        sqlite3_stmt* stmt;
+        int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, 0);
+        if (rc != SQLITE_OK) {
+            RCLCPP_ERROR(node_->get_logger(), "SQL 준비 실패: %s", sqlite3_errmsg(db_));
+            return keyframe_ids;
+        }
+        
+        // 결과 처리
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int keyframe_id = sqlite3_column_int(stmt, 0);
+            keyframe_ids.push_back(keyframe_id);
+        }
+        
+        sqlite3_finalize(stmt);
+        
+        // 순차적 데이터 정렬: 인덱스 기준으로 정렬하여 가까운 키프레임끼리 연속되게 함
+        if (!keyframe_ids.empty()) {
+            // 원래 로직처럼 index 기준으로 정렬하여 연속적인 키프레임들이 함께 처리되도록 함
+            std::sort(keyframe_ids.begin(), keyframe_ids.end(), 
+                      [&current_pose, this](int a, int b) {
+                          // 현재 키프레임 ID와의 인덱스 차이를 계산
+                          return std::abs(a - static_cast<int>(current_pose.intensity)) < 
+                                 std::abs(b - static_cast<int>(current_pose.intensity));
+                      });
+        }
+        
+        RCLCPP_DEBUG(node_->get_logger(), "공간 쿼리: 반경 %.2f m 내에서 %zu개 키프레임 발견", 
+                   radius, keyframe_ids.size());
+        
+        return keyframe_ids;
     }
-    
-    sqlite3_finalize(stmt);
-    
-    // 쿼리 결과 로그 추가
-    // RCLCPP_WARN(node_->get_logger(), "✓ [공간 쿼리 완료] %zu개 키프레임 발견 (최대 요청: %d)", 
-    //            result.size(), max_keyframes);
-    
-    return result;
+    catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "키프레임 공간 쿼리 중 예외 발생: %s", e.what());
+        return keyframe_ids;
+    }
 }
 
 pcl::PointCloud<PointType>::Ptr DBManager::loadGlobalMap(float leaf_size) {
@@ -815,7 +875,7 @@ void DBManager::enforceMemoryLimit() {
     // 제거 로그 추가 (INFO 레벨로 변경)
     // if (removed_count > 0) {
     //     RCLCPP_INFO(node_->get_logger(), "메모리 정리: %d개 키프레임 제거됨, 현재 캐시 크기: %zu", 
-    //                removed_count, cloud_cache_.size());
+        //                removed_count, cloud_cache_.size());
     // }
     
     // 비활성 키를 모두 제거해도 여전히 제한을 초과하는 특수한 경우
@@ -1063,4 +1123,462 @@ void DBManager::createDirectoryIfNotExists(const std::string& directory) {
             RCLCPP_ERROR(node_->get_logger(), "디렉토리 생성 실패: %s - %s", directory.c_str(), e.what());
         }
     }
+}
+
+bool DBManager::addLoopFeature(int feature_id, double timestamp, const PointTypePose& pose, 
+                               pcl::PointCloud<PointType>::Ptr cloud) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!initialized_) {
+        RCLCPP_ERROR(node_->get_logger(), "데이터베이스가 초기화되지 않았습니다");
+        return false;
+    }
+    
+    if (!cloud || cloud->empty()) {
+        RCLCPP_WARN(node_->get_logger(), "루프 특징점 ID %d: 빈 포인트 클라우드가 전달되었습니다", feature_id);
+        return false;
+    }
+    
+    try {
+        // 루프 특징점 테이블에 추가
+        char sql[1024];
+        sprintf(sql, "INSERT OR REPLACE INTO loop_features "
+                     "(id, timestamp, x, y, z, roll, pitch, yaw, cloud_file, num_points) "
+                     "VALUES (%d, %f, %f, %f, %f, %f, %f, %f, '%s', %zu);",
+                feature_id, timestamp,
+                pose.x, pose.y, pose.z, pose.roll, pose.pitch, pose.yaw,
+                getLoopFeatureFilePath(feature_id).c_str(), cloud->size());
+        
+        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: SQL 실행 시도", feature_id);
+        if (!executeSql(sql)) {
+            RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: SQL 실행 실패", feature_id);
+            return false;
+        }
+        
+        // R-Tree 인덱스 업데이트 (미세한 범위 추가)
+        double offset = 0.1; // 미세한 범위 추가 (10cm)
+        
+        sprintf(sql, "INSERT OR REPLACE INTO loop_features_rtree "
+                     "(id, min_x, max_x, min_y, max_y, min_z, max_z) "
+                     "VALUES (%d, %f, %f, %f, %f, %f, %f);",
+                feature_id,
+                pose.x - offset, pose.x + offset,
+                pose.y - offset, pose.y + offset,
+                pose.z - offset, pose.z + offset);
+        
+        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: R-Tree 인덱스 업데이트 시도", feature_id);
+        if (!executeSql(sql)) {
+            RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: R-Tree 인덱스 업데이트 실패", feature_id);
+            return false;
+        }
+        
+        // 포인트 클라우드 파일 저장
+        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: 파일 저장 시도 - 경로: %s", 
+                  feature_id, getLoopFeatureFilePath(feature_id).c_str());
+        if (!saveLoopFeatureToFile(feature_id, cloud)) {
+            RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: 클라우드 파일 저장 실패", feature_id);
+            return false;
+        }
+        
+        // 캐시에 추가
+        loop_feature_cache_[feature_id] = cloud;
+        
+        // 활성 ID 목록에 추가 (맨 앞에 추가)
+        auto it = std::find(active_loop_feature_ids_.begin(), active_loop_feature_ids_.end(), feature_id);
+        if (it != active_loop_feature_ids_.end()) {
+            active_loop_feature_ids_.erase(it);
+        }
+        active_loop_feature_ids_.insert(active_loop_feature_ids_.begin(), feature_id);
+        
+        // 메모리 제한 적용
+        enforceLoopFeatureMemoryLimit();
+        
+        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: DB에 성공적으로 추가됨", feature_id);
+        return true;
+    }
+    catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "루프 특징점 추가 중 예외 발생: %s", e.what());
+        return false;
+    }
+}
+
+// 루프 특징점 파일 경로 생성 함수
+std::string DBManager::getLoopFeatureFilePath(int feature_id) {
+    char filename[100];
+    sprintf(filename, "loop_feature_%d.pcd", feature_id);
+    return loop_features_directory_ + "/" + filename;
+}
+
+// 루프 특징점 클라우드 파일 저장 함수
+bool DBManager::saveLoopFeatureToFile(int feature_id, pcl::PointCloud<PointType>::Ptr cloud) {
+    if (!cloud || cloud->empty()) {
+        RCLCPP_WARN(node_->get_logger(), "루프 특징점 ID %d: 저장할 빈 포인트 클라우드", feature_id);
+        return false;
+    }
+    
+    std::string filepath = getLoopFeatureFilePath(feature_id);
+    
+    try {
+        // 디렉토리 존재 확인 및 생성
+        createDirectoryIfNotExists(loop_features_directory_);
+        
+        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: PCD 파일 저장 시도 (%zu 포인트) - %s", 
+                  feature_id, cloud->size(), filepath.c_str());
+        
+        // PCD 파일 저장
+        if (pcl::io::savePCDFileBinary(filepath, *cloud) == -1) {
+            RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: PCD 파일 저장 실패 - %s", feature_id, filepath.c_str());
+            return false;
+        }
+        
+        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: PCD 파일 저장 성공 - %s", feature_id, filepath.c_str());
+        return true;
+    }
+    catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "루프 특징점 PCD 파일 저장 중 예외 발생: %s", e.what());
+        return false;
+    }
+}
+
+// 루프 특징점 클라우드 파일 로드 함수
+pcl::PointCloud<PointType>::Ptr DBManager::loadLoopFeature(int feature_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!initialized_) {
+        RCLCPP_ERROR(node_->get_logger(), "데이터베이스가 초기화되지 않았습니다");
+        return pcl::PointCloud<PointType>::Ptr(new pcl::PointCloud<PointType>());
+    }
+    
+    // 캐시에 있는지 확인
+    auto it = loop_feature_cache_.find(feature_id);
+    if (it != loop_feature_cache_.end()) {
+        // 캐시에 있으면 활성 ID 목록 최신화
+        auto active_it = std::find(active_loop_feature_ids_.begin(), active_loop_feature_ids_.end(), feature_id);
+        if (active_it != active_loop_feature_ids_.end()) {
+            active_loop_feature_ids_.erase(active_it);
+        }
+        active_loop_feature_ids_.insert(active_loop_feature_ids_.begin(), feature_id);
+        
+        return it->second;
+    }
+    
+    // 데이터베이스에서 정보 조회
+    char sql[256];
+    sprintf(sql, "SELECT cloud_file FROM loop_features WHERE id = %d;", feature_id);
+    
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        RCLCPP_ERROR(node_->get_logger(), "SQL 준비 실패: %s", sqlite3_errmsg(db_));
+        return pcl::PointCloud<PointType>::Ptr(new pcl::PointCloud<PointType>());
+    }
+    
+    pcl::PointCloud<PointType>::Ptr cloud;
+    
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        // PCD 파일 로드
+        cloud = loadLoopFeatureFromFile(feature_id);
+        
+        // 캐시에 추가
+        if (cloud && !cloud->empty()) {
+            loop_feature_cache_[feature_id] = cloud;
+            
+            // 활성 ID 목록에 추가
+            active_loop_feature_ids_.insert(active_loop_feature_ids_.begin(), feature_id);
+            
+            // 메모리 제한 적용
+            enforceLoopFeatureMemoryLimit();
+        }
+    } else {
+        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: 데이터베이스에 존재하지 않습니다", feature_id);
+        cloud.reset(new pcl::PointCloud<PointType>());
+    }
+    
+    sqlite3_finalize(stmt);
+    return cloud;
+}
+
+// 루프 특징점 삭제 함수
+bool DBManager::deleteLoopFeature(int feature_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!initialized_) {
+        RCLCPP_ERROR(node_->get_logger(), "데이터베이스가 초기화되지 않았습니다");
+        return false;
+    }
+    
+    try {
+        // 데이터베이스에서 삭제
+        char sql[256];
+        sprintf(sql, "DELETE FROM loop_features WHERE id = %d;", feature_id);
+        if (!executeSql(sql)) {
+            return false;
+        }
+        
+        sprintf(sql, "DELETE FROM loop_features_rtree WHERE id = %d;", feature_id);
+        if (!executeSql(sql)) {
+            return false;
+        }
+        
+        // 파일 삭제
+        std::string filepath = getLoopFeatureFilePath(feature_id);
+        if (std::filesystem::exists(filepath)) {
+            std::filesystem::remove(filepath);
+        }
+        
+        // 캐시에서 삭제
+        loop_feature_cache_.erase(feature_id);
+        
+        // 활성 ID 목록에서 삭제
+        auto it = std::find(active_loop_feature_ids_.begin(), active_loop_feature_ids_.end(), feature_id);
+        if (it != active_loop_feature_ids_.end()) {
+            active_loop_feature_ids_.erase(it);
+        }
+        
+        return true;
+    }
+    catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "루프 특징점 삭제 중 예외 발생: %s", e.what());
+        return false;
+    }
+}
+
+void DBManager::enforceLoopFeatureMemoryLimit() {
+    // 루프 특징점 메모리 제한 적용
+    if (loop_feature_cache_.size() > static_cast<size_t>(max_memory_loop_features_)) {
+        // 비활성 특징점 제거
+        std::vector<int> non_active_keys;
+        for (const auto& pair : loop_feature_cache_) {
+            int feature_id = pair.first;
+            if (std::find(active_loop_feature_ids_.begin(), active_loop_feature_ids_.end(), feature_id) == active_loop_feature_ids_.end()) {
+                non_active_keys.push_back(feature_id);
+            }
+        }
+        
+        // 제거할 항목 수 계산
+        int num_to_remove = loop_feature_cache_.size() - max_memory_loop_features_;
+        
+        // 비활성 특징점 제거
+        int removed_count = 0;
+        for (int i = 0; i < std::min(num_to_remove, static_cast<int>(non_active_keys.size())); ++i) {
+            loop_feature_cache_.erase(non_active_keys[i]);
+            removed_count++;
+        }
+        
+        // 제거 로그 추가 (INFO 레벨로 변경)
+        // if (removed_count > 0) {
+        //     RCLCPP_INFO(node_->get_logger(), "메모리 정리: %d개 특징점 제거됨, 현재 캐시 크기: %zu", 
+        //                removed_count, loop_feature_cache_.size());
+        // }
+        
+        // 비활성 특징점을 모두 제거해도 여전히 제한을 초과하는 특수한 경우
+        // 이 경우 시스템이 루프 클로저와 같은 중요 작업을 수행 중일 수 있으므로
+        // 활성 특징점은 최대한 유지하고 로그만 출력
+        if (loop_feature_cache_.size() > static_cast<size_t>(max_memory_loop_features_)) {
+            RCLCPP_WARN(node_->get_logger(), "메모리 제한 초과: 캐시=%zu, 제한=%d, 활성 특징점=%zu", 
+                      loop_feature_cache_.size(), max_memory_loop_features_, active_loop_feature_ids_.size());
+        }
+    }
+}
+
+// 루프 특징점 클라우드 파일 로드 함수
+pcl::PointCloud<PointType>::Ptr DBManager::loadLoopFeatureFromFile(int feature_id) {
+    std::string filepath = getLoopFeatureFilePath(feature_id);
+    pcl::PointCloud<PointType>::Ptr cloud(new pcl::PointCloud<PointType>());
+    
+    try {
+        if (!std::filesystem::exists(filepath)) {
+            RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: PCD 파일이 존재하지 않습니다 - %s", feature_id, filepath.c_str());
+            return cloud; // 빈 클라우드 반환
+        }
+        
+        if (pcl::io::loadPCDFile<PointType>(filepath, *cloud) == -1) {
+            RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: PCD 파일 로드 실패 - %s", feature_id, filepath.c_str());
+            return pcl::PointCloud<PointType>::Ptr(new pcl::PointCloud<PointType>()); // 빈 클라우드 반환
+        }
+        
+        // RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: PCD 파일 로드 성공 - %s (%zu 포인트)", 
+        //               feature_id, filepath.c_str(), cloud->size());
+        return cloud;
+    }
+    catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "루프 특징점 PCD 파일 로드 중 예외 발생: %s", e.what());
+        return pcl::PointCloud<PointType>::Ptr(new pcl::PointCloud<PointType>()); // 빈 클라우드 반환
+    }
+}
+
+// 루프 특징점 공간 쿼리 함수
+std::vector<int> DBManager::loadLoopFeaturesByRadius(const PointTypePose& current_pose,
+                                                   double radius,
+                                                   int max_features) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::vector<int> feature_ids;
+    
+    if (!initialized_) {
+        RCLCPP_ERROR(node_->get_logger(), "데이터베이스가 초기화되지 않았습니다");
+        return feature_ids;
+    }
+    
+    try {
+        // 쿼리 생성 - X-Y 평면 기준으로만 검색 (Z축 무시)
+        char sql[512];
+        sprintf(sql, "SELECT id FROM loop_features_rtree WHERE "
+                     "min_x <= %f AND max_x >= %f AND "
+                     "min_y <= %f AND max_y >= %f "
+                     "ORDER BY (min_x - %f)*(min_x - %f) + (min_y - %f)*(min_y - %f) ASC "
+                     "LIMIT %d;",
+                current_pose.x + radius, current_pose.x - radius,
+                current_pose.y + radius, current_pose.y - radius,
+                current_pose.x, current_pose.x, current_pose.y, current_pose.y,
+                max_features);
+        
+        sqlite3_stmt* stmt;
+        int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, 0);
+        if (rc != SQLITE_OK) {
+            RCLCPP_ERROR(node_->get_logger(), "SQL 준비 실패: %s", sqlite3_errmsg(db_));
+            return feature_ids;
+        }
+        
+        // 결과 처리
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int feature_id = sqlite3_column_int(stmt, 0);
+            feature_ids.push_back(feature_id);
+        }
+        
+        sqlite3_finalize(stmt);
+        
+        // 순차적 데이터 정렬: 인덱스 기준으로 정렬하여 가까운 특징점끼리 연속되게 함
+        if (!feature_ids.empty()) {
+            // 원래 로직처럼 index 기준으로 정렬하여 연속적인 특징점들이 함께 처리되도록 함
+            std::sort(feature_ids.begin(), feature_ids.end(), 
+                      [&current_pose, this](int a, int b) {
+                          // 현재 특징점 ID와의 인덱스 차이를 계산
+                          return std::abs(a - static_cast<int>(current_pose.intensity)) < 
+                                 std::abs(b - static_cast<int>(current_pose.intensity));
+                      });
+        }
+        
+        RCLCPP_DEBUG(node_->get_logger(), "공간 쿼리: 반경 %.2f m 내에서 %zu개 루프 특징점 발견", 
+                   radius, feature_ids.size());
+        
+        return feature_ids;
+    }
+    catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "루프 특징점 공간 쿼리 중 예외 발생: %s", e.what());
+        return feature_ids;
+    }
+}
+
+// 루프 특징점 활성 윈도우 업데이트 함수
+void DBManager::updateLoopFeatureActiveWindow(const PointTypePose& current_pose) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!initialized_) {
+        RCLCPP_ERROR(node_->get_logger(), "데이터베이스가 초기화되지 않았습니다");
+        return;
+    }
+    
+    try {
+        // 현재 위치 주변의 루프 특징점 ID 로드 - X-Y 평면 기준으로만 검색 (Z축 무시)
+        char sql[512];
+        sprintf(sql, "SELECT id FROM loop_features_rtree WHERE "
+                     "min_x <= %f AND max_x >= %f AND "
+                     "min_y <= %f AND max_y >= %f "
+                     "ORDER BY (min_x - %f)*(min_x - %f) + (min_y - %f)*(min_y - %f) ASC "
+                     "LIMIT %d;",
+                current_pose.x + spatial_query_radius_, current_pose.x - spatial_query_radius_,
+                current_pose.y + spatial_query_radius_, current_pose.y - spatial_query_radius_,
+                current_pose.x, current_pose.x, current_pose.y, current_pose.y,
+                max_memory_loop_features_);
+        
+        sqlite3_stmt* stmt;
+        int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, 0);
+        if (rc != SQLITE_OK) {
+            RCLCPP_ERROR(node_->get_logger(), "SQL 준비 실패: %s", sqlite3_errmsg(db_));
+            return;
+        }
+        
+        // 새로운 활성 ID 목록 생성
+        std::vector<int> new_active_ids;
+        
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int feature_id = sqlite3_column_int(stmt, 0);
+            new_active_ids.push_back(feature_id);
+        }
+        
+        sqlite3_finalize(stmt);
+        
+        // 순차적 데이터 정렬: 인덱스 기준으로 정렬하여 가까운 특징점끼리 연속되게 함
+        if (!new_active_ids.empty()) {
+            // 원래 로직처럼 index 기준으로 정렬하여 연속적인 특징점들이 함께 처리되도록 함
+            std::sort(new_active_ids.begin(), new_active_ids.end(), 
+                      [&current_pose, this](int a, int b) {
+                          // 현재 특징점 ID와의 인덱스 차이를 계산
+                          return std::abs(a - static_cast<int>(current_pose.intensity)) < 
+                                 std::abs(b - static_cast<int>(current_pose.intensity));
+                      });
+        }
+        
+        // 기존 활성 ID 중 새 목록에 없는 것들을 제거하고 캐시도 정리
+        for (auto it = active_loop_feature_ids_.begin(); it != active_loop_feature_ids_.end(); ) {
+            int feature_id = *it;
+            if (std::find(new_active_ids.begin(), new_active_ids.end(), feature_id) == new_active_ids.end()) {
+                // 캐시에서 제거
+                loop_feature_cache_.erase(feature_id);
+                // 활성 ID 목록에서 제거
+                it = active_loop_feature_ids_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        
+        // 새 ID들을 활성 ID 목록에 추가 (중복 제거)
+        for (int feature_id : new_active_ids) {
+            if (std::find(active_loop_feature_ids_.begin(), active_loop_feature_ids_.end(), feature_id) == active_loop_feature_ids_.end()) {
+                active_loop_feature_ids_.push_back(feature_id);
+                
+                // 아직 캐시에 없는 경우 로드
+                if (loop_feature_cache_.find(feature_id) == loop_feature_cache_.end()) {
+                    pcl::PointCloud<PointType>::Ptr cloud = loadLoopFeatureFromFile(feature_id);
+                    if (cloud && !cloud->empty()) {
+                        loop_feature_cache_[feature_id] = cloud;
+                    }
+                }
+            }
+        }
+        
+        // 메모리 제한 적용
+        enforceLoopFeatureMemoryLimit();
+        
+        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 활성 윈도우 업데이트: %zu개 특징점 활성화, 캐시 크기: %zu", 
+                   active_loop_feature_ids_.size(), loop_feature_cache_.size());
+    }
+    catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "루프 특징점 활성 윈도우 업데이트 중 예외 발생: %s", e.what());
+    }
+}
+
+// 루프 특징점 통계 출력용 함수
+int DBManager::getNumLoopFeatures() const {
+    if (!initialized_) {
+        return 0;
+    }
+    
+    char sql[] = "SELECT COUNT(*) FROM loop_features;";
+    
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, 0);
+    if (rc != SQLITE_OK) {
+        RCLCPP_ERROR(node_->get_logger(), "SQL 준비 실패: %s", sqlite3_errmsg(db_));
+        return 0;
+    }
+    
+    int count = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        count = sqlite3_column_int(stmt, 0);
+    }
+    
+    sqlite3_finalize(stmt);
+    return count;
 } 

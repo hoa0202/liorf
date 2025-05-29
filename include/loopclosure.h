@@ -99,6 +99,15 @@ public:
 
     // 메모리 관리 함수 추가
     void clearTemporaryCache();
+    
+    // DB 모드 기능 추가
+    void saveLoopFeatureToDB(int feature_id, pcl::PointCloud<PointType>::Ptr cloud);
+    pcl::PointCloud<PointType>::Ptr loadLoopFeatureFromDB(int feature_id);
+    void updateActiveLoopFeatureWindow(const PointTypePose& current_pose);
+    
+    // DB 설정 함수
+    void setDBMode(bool use_db) { use_db_mode_ = use_db; }
+    bool isUsingDBMode() const { return use_db_mode_; }
 
 private:
     rclcpp::Node* node_;
