@@ -703,6 +703,16 @@ void DBManager::updateActiveWindow(const PointTypePose& current_pose) {
         }
     }
     
+    // 루프 특징점 메모리 사용량 계산
+    size_t loop_memory_usage = 0;
+    size_t loop_total_points = 0;
+    for (const auto& pair : loop_feature_cache_) {
+        if (pair.second) {
+            loop_memory_usage += pair.second->size() * sizeof(PointType);
+            loop_total_points += pair.second->size();
+        }
+    }
+    
     // 통계 로깅 - 5초마다 출력
     static auto last_log_time = std::chrono::steady_clock::now();
     auto current_time = std::chrono::steady_clock::now();
@@ -719,6 +729,12 @@ void DBManager::updateActiveWindow(const PointTypePose& current_pose) {
                    cloud_cache_.size(), 
                    static_cast<double>(memory_usage) / (1024 * 1024),
                    total_points);
+        
+        // 루프 특징점 캐시 정보 출력
+        RCLCPP_INFO(node_->get_logger(), "루프 특징점 캐시: %zu개의 특징점, %.2fMB 사용 중 (총 포인트: %zu개)",
+                   loop_feature_cache_.size(),
+                   static_cast<double>(loop_memory_usage) / (1024 * 1024),
+                   loop_total_points);
                    
         // 활성 키프레임 목록 로깅 (최대 10개까지만)
         std::string active_ids = "";
@@ -881,10 +897,10 @@ void DBManager::enforceMemoryLimit() {
     // 비활성 키를 모두 제거해도 여전히 제한을 초과하는 특수한 경우
     // 이 경우 시스템이 루프 클로저와 같은 중요 작업을 수행 중일 수 있으므로
     // 활성 키는 최대한 유지하고 로그만 출력
-    if (cloud_cache_.size() > static_cast<size_t>(max_memory_keyframes_)) {
-        RCLCPP_WARN(node_->get_logger(), "메모리 제한 초과: 캐시=%zu, 제한=%d, 활성 키프레임=%zu", 
-                  cloud_cache_.size(), max_memory_keyframes_, active_keyframe_ids_.size());
-    }
+    // if (cloud_cache_.size() > static_cast<size_t>(max_memory_keyframes_)) {
+    //     RCLCPP_WARN(node_->get_logger(), "메모리 제한 초과: 캐시=%zu, 제한=%d, 활성 키프레임=%zu", 
+    //               cloud_cache_.size(), max_memory_keyframes_, active_keyframe_ids_.size());
+    // }
 }
 
 void DBManager::printStats() {
@@ -894,6 +910,9 @@ void DBManager::printStats() {
         // 키프레임 수 조회
         int total_keyframes = getNumKeyFrames();
         
+        // 루프 특징점 수 조회
+        int total_loop_features = getNumLoopFeatures();
+        
         // 메모리 사용량 계산 (대략적인 추정)
         size_t memory_usage = 0;
         size_t total_points = 0;
@@ -901,6 +920,16 @@ void DBManager::printStats() {
             if (pair.second) {
                 memory_usage += pair.second->size() * sizeof(PointType);
                 total_points += pair.second->size();
+            }
+        }
+        
+        // 루프 특징점 메모리 사용량 계산
+        size_t loop_memory_usage = 0;
+        size_t loop_total_points = 0;
+        for (const auto& pair : loop_feature_cache_) {
+            if (pair.second) {
+                loop_memory_usage += pair.second->size() * sizeof(PointType);
+                loop_total_points += pair.second->size();
             }
         }
         
@@ -913,6 +942,12 @@ void DBManager::printStats() {
                    memory_usage / (1024.0 * 1024.0),
                    process_memory["VmRSS"] / (1024.0 * 1024.0),
                    process_memory["VmSize"] / (1024.0 * 1024.0));
+                   
+        // 루프 특징점 통계 정보 출력
+        RCLCPP_INFO(node_->get_logger(), "루프 특징점 상태: 캐시=%zu/총=%d 특징점, 메모리=%.2f MB, 포인트=%zu개",
+                   loop_feature_cache_.size(), total_loop_features,
+                   loop_memory_usage / (1024.0 * 1024.0),
+                   loop_total_points);
         
         // 자세한 로그는 DEBUG 레벨로 변경 (INFO 레벨 로그 감소)
         // 단, 디버그 로그는 기본적으로 비활성화
@@ -934,6 +969,20 @@ void DBManager::printStats() {
         }
         RCLCPP_DEBUG(node_->get_logger(), "활성 키프레임 ID: %s (총 %zu개)", 
                     active_ids.c_str(), active_keyframe_ids_.size());
+                    
+        // 활성 루프 특징점 목록 로깅 (최대 5개까지만)
+        std::string active_loop_ids = "";
+        int loop_count = 0;
+        for (int id : active_loop_feature_ids_) {
+            if (loop_count++ < 5) {
+                active_loop_ids += std::to_string(id) + " ";
+            } else {
+                active_loop_ids += "...";
+                break;
+            }
+        }
+        RCLCPP_DEBUG(node_->get_logger(), "활성 루프 특징점 ID: %s (총 %zu개)", 
+                    active_loop_ids.c_str(), active_loop_feature_ids_.size());
     } catch (const std::exception& e) {
         RCLCPP_ERROR(node_->get_logger(), "통계 정보 계산 중 오류 발생: %s", e.what());
     }
@@ -1149,7 +1198,7 @@ bool DBManager::addLoopFeature(int feature_id, double timestamp, const PointType
                 pose.x, pose.y, pose.z, pose.roll, pose.pitch, pose.yaw,
                 getLoopFeatureFilePath(feature_id).c_str(), cloud->size());
         
-        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: SQL 실행 시도", feature_id);
+        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: SQL 실행 시도", feature_id);
         if (!executeSql(sql)) {
             RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: SQL 실행 실패", feature_id);
             return false;
@@ -1166,14 +1215,14 @@ bool DBManager::addLoopFeature(int feature_id, double timestamp, const PointType
                 pose.y - offset, pose.y + offset,
                 pose.z - offset, pose.z + offset);
         
-        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: R-Tree 인덱스 업데이트 시도", feature_id);
+        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: R-Tree 인덱스 업데이트 시도", feature_id);
         if (!executeSql(sql)) {
             RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: R-Tree 인덱스 업데이트 실패", feature_id);
             return false;
         }
         
         // 포인트 클라우드 파일 저장
-        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: 파일 저장 시도 - 경로: %s", 
+        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: 파일 저장 시도 - 경로: %s", 
                   feature_id, getLoopFeatureFilePath(feature_id).c_str());
         if (!saveLoopFeatureToFile(feature_id, cloud)) {
             RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: 클라우드 파일 저장 실패", feature_id);
@@ -1193,7 +1242,7 @@ bool DBManager::addLoopFeature(int feature_id, double timestamp, const PointType
         // 메모리 제한 적용
         enforceLoopFeatureMemoryLimit();
         
-        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: DB에 성공적으로 추가됨", feature_id);
+        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: DB에 성공적으로 추가됨", feature_id);
         return true;
     }
     catch (const std::exception& e) {
@@ -1222,7 +1271,7 @@ bool DBManager::saveLoopFeatureToFile(int feature_id, pcl::PointCloud<PointType>
         // 디렉토리 존재 확인 및 생성
         createDirectoryIfNotExists(loop_features_directory_);
         
-        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: PCD 파일 저장 시도 (%zu 포인트) - %s", 
+        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: PCD 파일 저장 시도 (%zu 포인트) - %s", 
                   feature_id, cloud->size(), filepath.c_str());
         
         // PCD 파일 저장
@@ -1231,7 +1280,7 @@ bool DBManager::saveLoopFeatureToFile(int feature_id, pcl::PointCloud<PointType>
             return false;
         }
         
-        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: PCD 파일 저장 성공 - %s", feature_id, filepath.c_str());
+        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: PCD 파일 저장 성공 - %s", feature_id, filepath.c_str());
         return true;
     }
     catch (const std::exception& e) {
@@ -1374,10 +1423,10 @@ void DBManager::enforceLoopFeatureMemoryLimit() {
         // 비활성 특징점을 모두 제거해도 여전히 제한을 초과하는 특수한 경우
         // 이 경우 시스템이 루프 클로저와 같은 중요 작업을 수행 중일 수 있으므로
         // 활성 특징점은 최대한 유지하고 로그만 출력
-        if (loop_feature_cache_.size() > static_cast<size_t>(max_memory_loop_features_)) {
-            RCLCPP_WARN(node_->get_logger(), "메모리 제한 초과: 캐시=%zu, 제한=%d, 활성 특징점=%zu", 
-                      loop_feature_cache_.size(), max_memory_loop_features_, active_loop_feature_ids_.size());
-        }
+        // if (loop_feature_cache_.size() > static_cast<size_t>(max_memory_loop_features_)) {
+        //     RCLCPP_WARN(node_->get_logger(), "메모리 제한 초과: 캐시=%zu, 제한=%d, 활성 특징점=%zu", 
+        //               loop_feature_cache_.size(), max_memory_loop_features_, active_loop_feature_ids_.size());
+        // }
     }
 }
 

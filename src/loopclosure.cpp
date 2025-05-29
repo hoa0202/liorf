@@ -224,7 +224,7 @@ void LoopClosure::performRSLoopClosure()
             return;
 
     // 루프 클로저 후보 발견 - 로그 출력
-    RCLCPP_INFO(node_->get_logger(), "루프 클로저 매칭 시도: 현재=%d, 과거=%d, 간격=%d", 
+    RCLCPP_DEBUG(node_->get_logger(), "루프 클로저 매칭 시도: 현재=%d, 과거=%d, 간격=%d", 
                 loopKeyCur, loopKeyPre, std::abs(loopKeyCur - loopKeyPre));
 
     // extract cloud
@@ -280,14 +280,14 @@ void LoopClosure::performRSLoopClosure()
     pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
     icp.align(*unused_result);
 
-    if (icp.hasConverged() == false || icp.getFitnessScore() > historyKeyframeFitnessScore) {
-        RCLCPP_WARN(node_->get_logger(), "ICP 매칭 실패 - 수렴: %s, 점수: %.2f", 
-                   icp.hasConverged() ? "성공" : "실패", icp.getFitnessScore());
-        return;
-    }
+    // if (icp.hasConverged() == false || icp.getFitnessScore() > historyKeyframeFitnessScore) {
+    //     RCLCPP_WARN(node_->get_logger(), "ICP 매칭 실패 - 수렴: %s, 점수: %.2f", 
+    //                icp.hasConverged() ? "성공" : "실패", icp.getFitnessScore());
+    //     return;
+    // }
 
-    RCLCPP_INFO(node_->get_logger(), "ICP 매칭 성공 - 점수: %.4f (현재=%d, 과거=%d)", 
-               icp.getFitnessScore(), loopKeyCur, loopKeyPre);
+    // RCLCPP_INFO(node_->get_logger(), "ICP 매칭 성공 - 점수: %.4f (현재=%d, 과거=%d)", 
+    //            icp.getFitnessScore(), loopKeyCur, loopKeyPre);
 
     // publish corrected cloud
     if (pubIcpKeyFrames->get_subscription_count() != 0)
@@ -310,14 +310,14 @@ void LoopClosure::performRSLoopClosure()
     // DB 모드에서는 루프 특징점을 DB에 저장
     if (use_db_mode_ && db_manager_ && db_manager_->isInitialized()) {
         // 현재 키프레임 특징점 저장
-        RCLCPP_INFO(node_->get_logger(), "루프 특징점 저장: 현재 ID=%d", loopKeyCur);
+        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 저장: 현재 ID=%d", loopKeyCur);
         saveLoopFeatureToDB(loopKeyCur, cureKeyframeCloud);
         
         // 매칭된 이전 키프레임 특징점 저장
         // prevKeyframeCloud는 이미 여러 키프레임이 합쳐진 상태이므로 개별 키프레임 특징점만 저장
         auto singlePrevCloud = getKeyFrameFromDB(loopKeyPre);
         if (singlePrevCloud && !singlePrevCloud->empty()) {
-            RCLCPP_INFO(node_->get_logger(), "루프 특징점 저장: 과거 ID=%d", loopKeyPre);
+            RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 저장: 과거 ID=%d", loopKeyPre);
             saveLoopFeatureToDB(loopKeyPre, singlePrevCloud);
         }
         
@@ -348,7 +348,7 @@ void LoopClosure::performRSLoopClosure()
     aLoopIsClosed = true;
     loopIndexContainer[loopKeyCur] = loopKeyPre;
     
-    RCLCPP_INFO(node_->get_logger(), "루프 클로저 성공 - 현재=%d, 과거=%d, 거리=%.2f m, 간격=%d", 
+    RCLCPP_DEBUG(node_->get_logger(), "루프 클로저 성공 - 현재=%d, 과거=%d, 거리=%.2f m, 간격=%d", 
                loopKeyCur, loopKeyPre, 
                sqrt(pow(cloudKeyPoses3D->points[loopKeyCur].x - cloudKeyPoses3D->points[loopKeyPre].x, 2) +
                     pow(cloudKeyPoses3D->points[loopKeyCur].y - cloudKeyPoses3D->points[loopKeyPre].y, 2)),
@@ -388,7 +388,7 @@ void LoopClosure::performSCLoopClosure()
     }
     
     // 루프 클로저 후보 발견 - 로그 출력
-    RCLCPP_INFO(node_->get_logger(), "SC 루프 클로저 후보 발견: 현재=%d, 과거=%d, 간격=%d", 
+    RCLCPP_DEBUG(node_->get_logger(), "SC 루프 클로저 후보 발견: 현재=%d, 과거=%d, 간격=%d", 
                 loopKeyCur, loopKeyPre, std::abs(loopKeyCur - loopKeyPre));
 
     // extract cloud
@@ -429,8 +429,8 @@ void LoopClosure::performSCLoopClosure()
         return;
     }
     
-    RCLCPP_INFO(node_->get_logger(), "SC ICP 매칭 성공 - 점수: %.4f (현재=%d, 과거=%d)", 
-               icp.getFitnessScore(), loopKeyCur, loopKeyPre);
+    // RCLCPP_INFO(node_->get_logger(), "SC ICP 매칭 성공 - 점수: %.4f (현재=%d, 과거=%d)", 
+    //            icp.getFitnessScore(), loopKeyCur, loopKeyPre);
 
     // publish corrected cloud
     if (pubIcpKeyFrames->get_subscription_count() != 0)
@@ -472,7 +472,7 @@ void LoopClosure::performSCLoopClosure()
     aLoopIsClosed = true;
     
     // 루프 클로저 성공 로그
-    RCLCPP_INFO(node_->get_logger(), "SC 루프 클로저 성공 - 현재=%d, 과거=%d, 거리=%.2f m, 간격=%d", 
+    RCLCPP_DEBUG(node_->get_logger(), "SC 루프 클로저 성공 - 현재=%d, 과거=%d, 거리=%.2f m, 간격=%d", 
                loopKeyCur, loopKeyPre, 
                sqrt(pow(cloudKeyPoses3D->points[loopKeyCur].x - cloudKeyPoses3D->points[loopKeyPre].x, 2) +
                     pow(cloudKeyPoses3D->points[loopKeyCur].y - cloudKeyPoses3D->points[loopKeyPre].y, 2)),
@@ -570,7 +570,7 @@ bool LoopClosure::detectLoopClosureDistance(int *latestID, int *closestID)
     if (loopKeyPre == -1 || loopKeyCur == loopKeyPre)
         return false;
         
-    RCLCPP_INFO(node_->get_logger(), "루프 클로저 후보 감지: 현재=%d, 과거=%d (간격: %d)", 
+    RCLCPP_DEBUG(node_->get_logger(), "루프 클로저 후보 감지: 현재=%d, 과거=%d (간격: %d)", 
                loopKeyCur, loopKeyPre, std::abs(loopKeyCur - loopKeyPre));
 
     *latestID = loopKeyCur;
@@ -844,33 +844,31 @@ void PublishCloudMsg(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Sha
 // DB 관련 기능 추가
 void LoopClosure::saveLoopFeatureToDB(int feature_id, pcl::PointCloud<PointType>::Ptr cloud) {
     if (!use_db_mode_ || !db_manager_ || !db_manager_->isInitialized()) {
-        RCLCPP_WARN(node_->get_logger(), "DB 모드가 활성화되지 않았거나 DB 관리자가 초기화되지 않았습니다");
+        RCLCPP_ERROR(node_->get_logger(), "DB 모드가 아니거나 DB 관리자가 초기화되지 않았습니다");
+        return;
+    }
+
+    if (feature_id < 0 || !cloud || cloud->empty()) {
+        RCLCPP_ERROR(node_->get_logger(), "유효하지 않은 특징점 또는 빈 클라우드: ID=%d", feature_id);
+        return;
+    }
+
+    // 키프레임 포즈 가져오기
+    if (feature_id >= cloudKeyPoses6D->size()) {
+        RCLCPP_ERROR(node_->get_logger(), "키프레임 ID(%d)가 범위를 벗어남: 크기=%zu", 
+                    feature_id, cloudKeyPoses6D->size());
         return;
     }
     
-    if (!cloud || cloud->empty()) {
-        RCLCPP_WARN(node_->get_logger(), "루프 특징점 ID %d: 빈 포인트 클라우드가 전달되었습니다", feature_id);
-        return;
-    }
-    
-    // 루프 특징점이 있는 위치의 포즈 정보 가져오기
-    if (cloudKeyPoses6D->points.empty() || feature_id < 0 || feature_id >= static_cast<int>(cloudKeyPoses6D->points.size())) {
-        RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: 유효하지 않은 ID (총 포즈 수: %zu)", 
-                   feature_id, cloudKeyPoses6D->points.size());
-        return;
-    }
-    
-    // 해당 ID의 포즈 가져오기
+    // 키프레임 포즈 가져오기
     PointTypePose pose = cloudKeyPoses6D->points[feature_id];
-    double timestamp = timeLaserInfoCur; // 현재 타임스탬프 사용
+    double timestamp = cloudKeyPoses6D->points[feature_id].time;
+    
+    RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: SQL 실행 시도", feature_id);
     
     // DB에 저장
-    RCLCPP_INFO(node_->get_logger(), "루프 특징점 DB 저장 시도: ID=%d, 포인트=%zu개, 위치=(%.2f, %.2f, %.2f)", 
-               feature_id, cloud->size(), pose.x, pose.y, pose.z);
-    
-    bool success = db_manager_->addLoopFeature(feature_id, timestamp, pose, cloud);
-    if (success) {
-        RCLCPP_INFO(node_->get_logger(), "루프 특징점 ID %d: DB 저장 성공", feature_id);
+    if (db_manager_->addLoopFeature(feature_id, timestamp, pose, cloud)) {
+        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: DB 저장 성공", feature_id);
     } else {
         RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: DB 저장 실패", feature_id);
     }
