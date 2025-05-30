@@ -19,6 +19,12 @@
 #include <unistd.h>
 #include <fstream>
 #include <map>
+// 비동기 작업을 위한 추가 헤더
+#include <queue>
+#include <functional>
+#include <condition_variable>
+#include <future>
+#include <atomic>
 
 // utility.h 파일 포함 이동 (모든 타입 정의 확인을 위해)
 #include "utility.h"
@@ -38,13 +44,13 @@ public:
     // 초기화 함수
     bool initialize();
     
-    // 키프레임 관련 함수
+    // 키프레임 관련 함수 (동기)
     bool addKeyFrame(int keyframe_id, double timestamp, const PointTypePose& pose, 
                     pcl::PointCloud<PointType>::Ptr cloud);
     pcl::PointCloud<PointType>::Ptr loadCloud(int keyframe_id);
     bool deleteKeyFrame(int keyframe_id);
     
-    // 루프 클로저 특징점 관련 함수
+    // 루프 클로저 특징점 관련 함수 (동기)
     bool addLoopFeature(int feature_id, double timestamp, const PointTypePose& pose,
                       pcl::PointCloud<PointType>::Ptr cloud);
     pcl::PointCloud<PointType>::Ptr loadLoopFeature(int feature_id);
@@ -87,6 +93,32 @@ public:
     // 로컬라이제이션 모드 설정/조회 함수
     void setLocalizationMode(bool mode) { localization_mode_ = mode; }
     bool getLocalizationMode() const { return localization_mode_; }
+    
+    // 비동기 함수 추가
+    void addKeyFrameAsync(int keyframe_id, double timestamp, const PointTypePose& pose, 
+                         pcl::PointCloud<PointType>::Ptr cloud);
+    std::future<bool> addKeyFrameAsyncWithFuture(int keyframe_id, double timestamp, 
+                                               const PointTypePose& pose, 
+                                               pcl::PointCloud<PointType>::Ptr cloud);
+    
+    void deleteKeyFrameAsync(int keyframe_id);
+    void addLoopFeatureAsync(int feature_id, double timestamp, const PointTypePose& pose,
+                           pcl::PointCloud<PointType>::Ptr cloud);
+    void deleteLoopFeatureAsync(int feature_id);
+    
+    // 큐 관리 함수
+    size_t getQueueSize();
+    void waitForEmptyQueue(std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
+    bool isQueueEmpty();
+    
+    // 오류 처리 관련
+    struct TaskError {
+        std::string operation;
+        std::string message;
+        std::chrono::system_clock::time_point timestamp;
+    };
+    
+    std::vector<TaskError> getAndClearErrors();
     
 private:
     // 데이터베이스 관련 변수
@@ -148,6 +180,28 @@ private:
     
     // 파일 시스템 유틸리티
     void createDirectoryIfNotExists(const std::string& directory);
+    
+    // 작업 큐 및 스레드 관련 변수
+    std::queue<std::function<void()>> dbTaskQueue_;
+    std::mutex dbQueueMutex_;
+    std::condition_variable dbQueueCV_;
+    std::condition_variable dbQueueEmptyCV_;
+    std::thread dbWorkerThread_;
+    std::atomic<bool> shutdownWorker_{false};
+    std::atomic<size_t> pendingTasks_{0};
+    
+    // 최대 큐 크기 (백프레셔 메커니즘)
+    const size_t MAX_QUEUE_SIZE = 100;
+    
+    // 오류 기록용 큐
+    std::vector<TaskError> errorQueue_;
+    std::mutex errorMutex_;
+    
+    // 워커 스레드 함수
+    void dbWorkerThreadFunction();
+    
+    // 내부 오류 처리 함수
+    void logTaskError(const std::string& operation, const std::string& message);
 };
 
 #endif // DB_MANAGER_H 

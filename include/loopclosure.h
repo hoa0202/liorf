@@ -75,8 +75,8 @@ public:
     // DB 모드용 데이터 설정 함수 추가
     void setInputDataWithDB(pcl::PointCloud<PointType>::Ptr& keyPoses3D, 
                            pcl::PointCloud<PointTypePose>::Ptr& keyPoses6D, 
-                           double currentTimestamp,
-                           pcl::PointCloud<PointType>::Ptr currentScan = nullptr);
+                     double currentTimestamp,
+                     pcl::PointCloud<PointType>::Ptr currentScan = nullptr);
     
     // 루프 감지 및 처리
     void loopInfoHandler(const std_msgs::msg::Float64MultiArray::SharedPtr loopMsg);

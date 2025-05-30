@@ -15,7 +15,9 @@ DBManager::DBManager(rclcpp::Node* node,
       initialized_(false),
       stop_thread_(false),
       reset_on_start_(reset_on_start),
-      localization_mode_(localization_mode)
+      localization_mode_(localization_mode),
+      shutdownWorker_(false),
+      pendingTasks_(0)
 {
     // 상대 경로인 경우 절대 경로로 변환
     if (db_path.empty()) {
@@ -63,12 +65,39 @@ DBManager::DBManager(rclcpp::Node* node,
                
     RCLCPP_INFO(node_->get_logger(), "로컬라이제이션 모드: %s", 
                localization_mode_ ? "활성화 (데이터베이스 보존)" : "비활성화 (일반 매핑 모드)");
+               
+    // 워커 스레드 시작
+    dbWorkerThread_ = std::thread(&DBManager::dbWorkerThreadFunction, this);
+    RCLCPP_INFO(node_->get_logger(), "DB 비동기 작업 스레드 시작됨");
 }
 
 DBManager::~DBManager() {
+    // 워커 스레드 정리
+    RCLCPP_INFO(node_->get_logger(), "DB 워커 스레드 종료 신호 전송");
+    {
+        std::unique_lock<std::mutex> lock(dbQueueMutex_);
+        shutdownWorker_ = true;
+    }
+    dbQueueCV_.notify_one();
+    
+    // 워커 스레드 종료 대기
+    if (dbWorkerThread_.joinable()) {
+        RCLCPP_INFO(node_->get_logger(), "DB 워커 스레드 종료 대기 중 (남은 작업: %zu)", pendingTasks_.load());
+        dbWorkerThread_.join();
+        RCLCPP_INFO(node_->get_logger(), "DB 워커 스레드 종료됨");
+    }
+    
+    // 남은 작업이 있다면 로그 출력
+    {
+        std::unique_lock<std::mutex> lock(dbQueueMutex_);
+        if (!dbTaskQueue_.empty()) {
+            RCLCPP_WARN(node_->get_logger(), "처리되지 않은 DB 작업 %zu개가 있습니다", dbTaskQueue_.size());
+        }
+    }
+    
+    // 기존 종료 로직
     stopMemoryMonitoring();
     
-    // 데이터베이스 연결 닫기
     if (db_ != nullptr) {
         sqlite3_close(db_);
         db_ = nullptr;
@@ -138,7 +167,7 @@ bool DBManager::initialize() {
         
         // 추가 디버깅 정보
         RCLCPP_ERROR(node_->get_logger(), "파일 디렉토리 권한 확인: %s", db_dir.c_str());
-        system(("ls -la " + db_dir + " >> /tmp/dbdebug.txt").c_str());
+        int ret = system(("ls -la " + db_dir + " >> /tmp/dbdebug.txt").c_str());
         
         return false;
     }
@@ -1630,4 +1659,328 @@ int DBManager::getNumLoopFeatures() const {
     
     sqlite3_finalize(stmt);
     return count;
-} 
+}
+
+// 워커 스레드 함수 구현
+void DBManager::dbWorkerThreadFunction() {
+    RCLCPP_INFO(node_->get_logger(), "DB 워커 스레드 시작");
+    
+    while (!shutdownWorker_) {
+        std::function<void()> task;
+        bool hasTask = false;
+        
+        {
+            std::unique_lock<std::mutex> lock(dbQueueMutex_);
+            dbQueueCV_.wait(lock, [this] { 
+                return !dbTaskQueue_.empty() || shutdownWorker_.load(); 
+            });
+            
+            if (shutdownWorker_ && dbTaskQueue_.empty()) {
+                break;
+            }
+            
+            if (!dbTaskQueue_.empty()) {
+                task = std::move(dbTaskQueue_.front());
+                dbTaskQueue_.pop();
+                hasTask = true;
+                pendingTasks_--;
+            }
+            
+            // 큐가 비었다면 대기 중인 스레드들에게 알림
+            if (dbTaskQueue_.empty()) {
+                dbQueueEmptyCV_.notify_all();
+            }
+        }
+        
+        // 큐에서 꺼낸 작업 실행
+        if (hasTask) {
+            try {
+                task();
+            } catch (const std::exception& e) {
+                // 오류 발생 시 로깅
+                std::string errorMsg = std::string("DB 작업 실행 중 예외 발생: ") + e.what();
+                RCLCPP_ERROR(node_->get_logger(), "%s", errorMsg.c_str());
+                logTaskError("작업 실행", errorMsg);
+            } catch (...) {
+                // 알 수 없는 예외 처리
+                RCLCPP_ERROR(node_->get_logger(), "DB 작업 실행 중 알 수 없는 예외 발생");
+                logTaskError("작업 실행", "알 수 없는 예외");
+            }
+        }
+    }
+    
+    RCLCPP_INFO(node_->get_logger(), "DB 워커 스레드 종료");
+}
+
+// 오류 처리 함수
+void DBManager::logTaskError(const std::string& operation, const std::string& message) {
+    std::lock_guard<std::mutex> lock(errorMutex_);
+    errorQueue_.push_back({
+        operation, 
+        message, 
+        std::chrono::system_clock::now()
+    });
+    
+    // 오류 큐 크기 제한 (최신 100개만 유지)
+    if (errorQueue_.size() > 100) {
+        errorQueue_.erase(errorQueue_.begin());
+    }
+}
+
+std::vector<DBManager::TaskError> DBManager::getAndClearErrors() {
+    std::lock_guard<std::mutex> lock(errorMutex_);
+    std::vector<TaskError> errors = std::move(errorQueue_);
+    errorQueue_.clear();
+    return errors;
+}
+
+// 큐 관리 함수
+size_t DBManager::getQueueSize() {
+    std::lock_guard<std::mutex> lock(dbQueueMutex_);
+    return dbTaskQueue_.size();
+}
+
+bool DBManager::isQueueEmpty() {
+    std::lock_guard<std::mutex> lock(dbQueueMutex_);
+    return dbTaskQueue_.empty();
+}
+
+void DBManager::waitForEmptyQueue(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(dbQueueMutex_);
+    if (dbTaskQueue_.empty()) {
+        return;
+    }
+    
+    // 타임아웃으로 대기
+    dbQueueEmptyCV_.wait_for(lock, timeout, [this] {
+        return dbTaskQueue_.empty();
+    });
+}
+
+// 비동기 키프레임 추가 함수
+void DBManager::addKeyFrameAsync(int keyframe_id, double timestamp, 
+                                const PointTypePose& pose, 
+                                pcl::PointCloud<PointType>::Ptr cloud) {
+    if (!initialized_) {
+        RCLCPP_WARN(node_->get_logger(), "DB가 초기화되지 않았습니다. 키프레임 추가 무시: %d", keyframe_id);
+        return;
+    }
+    
+    // 클라우드 복사본 생성 (메모리 안전)
+    auto cloud_copy = std::make_shared<pcl::PointCloud<PointType>>(*cloud);
+    
+    // 큐 크기 체크 및 백프레셔 메커니즘
+    {
+        std::unique_lock<std::mutex> lock(dbQueueMutex_);
+        if (dbTaskQueue_.size() >= MAX_QUEUE_SIZE) {
+            RCLCPP_WARN(node_->get_logger(), 
+                      "DB 작업 큐가 가득 찼습니다 (%zu). 작업 진행을 위해 대기합니다.", 
+                      MAX_QUEUE_SIZE);
+            
+            // 큐 공간이 생길 때까지 대기
+            dbQueueEmptyCV_.wait(lock, [this] {
+                return dbTaskQueue_.size() < MAX_QUEUE_SIZE || shutdownWorker_.load();
+            });
+            
+            if (shutdownWorker_) {
+                RCLCPP_WARN(node_->get_logger(), "종료 중이므로 키프레임 추가 작업 취소: %d", keyframe_id);
+                return;
+            }
+        }
+        
+        // 작업 큐에 추가
+        dbTaskQueue_.push([=, this]() {
+            if (!this->addKeyFrame(keyframe_id, timestamp, pose, cloud_copy)) {
+                logTaskError("키프레임 추가", 
+                           "키프레임 ID " + std::to_string(keyframe_id) + " 추가 실패");
+            }
+        });
+        
+        pendingTasks_++;
+    }
+    dbQueueCV_.notify_one();
+}
+
+// Future를 반환하는 비동기 키프레임 추가 함수
+std::future<bool> DBManager::addKeyFrameAsyncWithFuture(
+    int keyframe_id, double timestamp, 
+    const PointTypePose& pose, 
+    pcl::PointCloud<PointType>::Ptr cloud) {
+    
+    if (!initialized_) {
+        RCLCPP_WARN(node_->get_logger(), "DB가 초기화되지 않았습니다. 키프레임 추가 무시: %d", keyframe_id);
+        std::promise<bool> promise;
+        promise.set_value(false);
+        return promise.get_future();
+    }
+    
+    // 클라우드 복사본 생성
+    auto cloud_copy = std::make_shared<pcl::PointCloud<PointType>>(*cloud);
+    
+    // promise/future 생성
+    auto promise = std::make_shared<std::promise<bool>>();
+    std::future<bool> future = promise->get_future();
+    
+    // 큐 크기 체크 및 백프레셔 메커니즘
+    {
+        std::unique_lock<std::mutex> lock(dbQueueMutex_);
+        if (dbTaskQueue_.size() >= MAX_QUEUE_SIZE) {
+            RCLCPP_WARN(node_->get_logger(), 
+                      "DB 작업 큐가 가득 찼습니다 (%zu). 작업 진행을 위해 대기합니다.", 
+                      MAX_QUEUE_SIZE);
+            
+            // 큐 공간이 생길 때까지 대기
+            dbQueueEmptyCV_.wait(lock, [this] {
+                return dbTaskQueue_.size() < MAX_QUEUE_SIZE || shutdownWorker_.load();
+            });
+            
+            if (shutdownWorker_) {
+                RCLCPP_WARN(node_->get_logger(), "종료 중이므로 키프레임 추가 작업 취소: %d", keyframe_id);
+                promise->set_value(false);
+                return future;
+            }
+        }
+        
+        // 작업 큐에 추가
+        dbTaskQueue_.push([=, this]() {
+            try {
+                bool result = this->addKeyFrame(keyframe_id, timestamp, pose, cloud_copy);
+                promise->set_value(result);
+                
+                if (!result) {
+                    logTaskError("키프레임 추가", 
+                              "키프레임 ID " + std::to_string(keyframe_id) + " 추가 실패");
+                }
+            } catch (const std::exception& e) {
+                promise->set_exception(std::current_exception());
+            }
+        });
+        
+        pendingTasks_++;
+    }
+    dbQueueCV_.notify_one();
+    
+    return future;
+}
+
+// 비동기 키프레임 삭제 함수
+void DBManager::deleteKeyFrameAsync(int keyframe_id) {
+    if (!initialized_) {
+        RCLCPP_WARN(node_->get_logger(), "DB가 초기화되지 않았습니다. 키프레임 삭제 무시: %d", keyframe_id);
+        return;
+    }
+    
+    // 큐 크기 체크 및 백프레셔 메커니즘
+    {
+        std::unique_lock<std::mutex> lock(dbQueueMutex_);
+        if (dbTaskQueue_.size() >= MAX_QUEUE_SIZE) {
+            RCLCPP_WARN(node_->get_logger(), 
+                      "DB 작업 큐가 가득 찼습니다 (%zu). 작업 진행을 위해 대기합니다.", 
+                      MAX_QUEUE_SIZE);
+            
+            // 큐 공간이 생길 때까지 대기
+            dbQueueEmptyCV_.wait(lock, [this] {
+                return dbTaskQueue_.size() < MAX_QUEUE_SIZE || shutdownWorker_.load();
+            });
+            
+            if (shutdownWorker_) {
+                RCLCPP_WARN(node_->get_logger(), "종료 중이므로 키프레임 삭제 작업 취소: %d", keyframe_id);
+                return;
+            }
+        }
+        
+        // 작업 큐에 추가
+        dbTaskQueue_.push([=, this]() {
+            if (!this->deleteKeyFrame(keyframe_id)) {
+                logTaskError("키프레임 삭제", 
+                           "키프레임 ID " + std::to_string(keyframe_id) + " 삭제 실패");
+            }
+        });
+        
+        pendingTasks_++;
+    }
+    dbQueueCV_.notify_one();
+}
+
+// 비동기 루프 특징점 추가 함수
+void DBManager::addLoopFeatureAsync(int feature_id, double timestamp, 
+                                   const PointTypePose& pose, 
+                                   pcl::PointCloud<PointType>::Ptr cloud) {
+    if (!initialized_) {
+        RCLCPP_WARN(node_->get_logger(), "DB가 초기화되지 않았습니다. 루프 특징점 추가 무시: %d", feature_id);
+        return;
+    }
+    
+    // 클라우드 복사본 생성 (메모리 안전)
+    auto cloud_copy = std::make_shared<pcl::PointCloud<PointType>>(*cloud);
+    
+    // 큐 크기 체크 및 백프레셔 메커니즘
+    {
+        std::unique_lock<std::mutex> lock(dbQueueMutex_);
+        if (dbTaskQueue_.size() >= MAX_QUEUE_SIZE) {
+            RCLCPP_WARN(node_->get_logger(), 
+                      "DB 작업 큐가 가득 찼습니다 (%zu). 작업 진행을 위해 대기합니다.", 
+                      MAX_QUEUE_SIZE);
+            
+            // 큐 공간이 생길 때까지 대기
+            dbQueueEmptyCV_.wait(lock, [this] {
+                return dbTaskQueue_.size() < MAX_QUEUE_SIZE || shutdownWorker_.load();
+            });
+            
+            if (shutdownWorker_) {
+                RCLCPP_WARN(node_->get_logger(), "종료 중이므로 루프 특징점 추가 작업 취소: %d", feature_id);
+                return;
+            }
+        }
+        
+        // 작업 큐에 추가
+        dbTaskQueue_.push([=, this]() {
+            if (!this->addLoopFeature(feature_id, timestamp, pose, cloud_copy)) {
+                logTaskError("루프 특징점 추가", 
+                           "루프 특징점 ID " + std::to_string(feature_id) + " 추가 실패");
+            }
+        });
+        
+        pendingTasks_++;
+    }
+    dbQueueCV_.notify_one();
+}
+
+// 비동기 루프 특징점 삭제 함수
+void DBManager::deleteLoopFeatureAsync(int feature_id) {
+    if (!initialized_) {
+        RCLCPP_WARN(node_->get_logger(), "DB가 초기화되지 않았습니다. 루프 특징점 삭제 무시: %d", feature_id);
+        return;
+    }
+    
+    // 큐 크기 체크 및 백프레셔 메커니즘
+    {
+        std::unique_lock<std::mutex> lock(dbQueueMutex_);
+        if (dbTaskQueue_.size() >= MAX_QUEUE_SIZE) {
+            RCLCPP_WARN(node_->get_logger(), 
+                      "DB 작업 큐가 가득 찼습니다 (%zu). 작업 진행을 위해 대기합니다.", 
+                      MAX_QUEUE_SIZE);
+            
+            // 큐 공간이 생길 때까지 대기
+            dbQueueEmptyCV_.wait(lock, [this] {
+                return dbTaskQueue_.size() < MAX_QUEUE_SIZE || shutdownWorker_.load();
+            });
+            
+            if (shutdownWorker_) {
+                RCLCPP_WARN(node_->get_logger(), "종료 중이므로 루프 특징점 삭제 작업 취소: %d", feature_id);
+                return;
+            }
+        }
+        
+        // 작업 큐에 추가
+        dbTaskQueue_.push([=, this]() {
+            if (!this->deleteLoopFeature(feature_id)) {
+                logTaskError("루프 특징점 삭제", 
+                           "루프 특징점 ID " + std::to_string(feature_id) + " 삭제 실패");
+            }
+        });
+        
+        pendingTasks_++;
+    }
+    dbQueueCV_.notify_one();
+}

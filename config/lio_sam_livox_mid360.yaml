@@ -102,13 +102,13 @@
 
     # Loop closure
     loopClosureEnableFlag: true
-    loopClosureFrequency: 1.0                     # Hz, regulate loop closure constraint add frequency
+    loopClosureFrequency: 0.5                     # Hz, regulate loop closure constraint add frequency
     surroundingKeyframeSize: 50                   # submap size (when loop closure enabled)
-    historyKeyframeSearchRadius: 10.0             # meters, key frame that is within n meters from current pose will be considerd for loop closure
+    historyKeyframeSearchRadius: 5.0             # meters, key frame that is within n meters from current pose will be considerd for loop closure
     historyKeyframeSearchTimeDiff: 15.0           # seconds, key frame that is n seconds older will be considered for loop closure
     historyKeyframeSearchNum: 25                  # number of hostory key frames will be fused into a submap for loop closure
     loopClosureICPSurfLeafSize: 0.3               # downsample icp point cloud  
-    historyKeyframeFitnessScore: 0.2              # icp threshold, the smaller the better alignment
+    historyKeyframeFitnessScore: 0.1              # icp threshold, the smaller the better alignment
 
     # Visualization
     globalMapVisualizationSearchRadius: 200.0    # meters, global map visualization radius
@@ -121,8 +121,8 @@
     localization_mode: false                      # 로컬라이제이션 모드 여부 (true: 기존 맵 유지, false: 새 맵 생성)
     database_path: "/root/liorf_ws2/src/liorf/maps/slam_map.db" # 경로 수정금지 데이터베이스 파일 경로
     clouds_directory: "/root/liorf_ws2/src/liorf/maps/clouds"   # 경로 수정금지 포인트 클라우드 저장 디렉토리 경로
-    active_keyframes_window_size: 5               # 메모리에 유지할 최대 키프레임 수 (100에서 5로 변경)
-    spatial_query_radius: 50.0                    # 공간 쿼리 반경 (미터)
+    active_keyframes_window_size: 200               # 메모리에 유지할 최대 키프레임 수 (100에서 5로 변경)
+    spatial_query_radius: 5.0                    # 공간 쿼리 반경 (미터)
 
     # Costmap Settings
     costmap_resolution: 0.1                       # 코스트맵 해상도 (미터)

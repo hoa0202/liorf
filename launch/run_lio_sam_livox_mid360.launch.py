@@ -111,9 +111,9 @@ def generate_launch_description():
                'use_database_mode': True,
                'database_path': '/root/liorf_ws2/src/liorf/maps/slam_map.db', # 경로 수정금지 /root/liorf_ws2/src/liorf/maps/slam_map.db 고정
                'clouds_directory': '/root/liorf_ws2/src/liorf/maps/clouds', # 경로 수정금지 /root/liorf_ws2/src/liorf/maps/clouds 고정
-               'active_keyframes_window_size': 100,
-               'active_loop_features_window_size' : 100,
-               'spatial_query_radius': 10.0
+               'active_keyframes_window_size': 200,
+               'active_loop_features_window_size' : 200,
+               'spatial_query_radius': 5.0
            }],
             arguments=['--ros-args', '--log-level', [log_level]],
             output='screen'

@@ -280,14 +280,14 @@ void LoopClosure::performRSLoopClosure()
     pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
     icp.align(*unused_result);
 
-    // if (icp.hasConverged() == false || icp.getFitnessScore() > historyKeyframeFitnessScore) {
-    //     RCLCPP_WARN(node_->get_logger(), "ICP 매칭 실패 - 수렴: %s, 점수: %.2f", 
-    //                icp.hasConverged() ? "성공" : "실패", icp.getFitnessScore());
-    //     return;
-    // }
+    if (icp.hasConverged() == false || icp.getFitnessScore() > historyKeyframeFitnessScore) {
+        RCLCPP_WARN(node_->get_logger(), "RS ICP 매칭 실패 - 수렴: %s, 점수: %.2f (임계값: %.2f)", 
+                   icp.hasConverged() ? "성공" : "실패", icp.getFitnessScore(), historyKeyframeFitnessScore);
+        return;
+    }
 
-    // RCLCPP_INFO(node_->get_logger(), "ICP 매칭 성공 - 점수: %.4f (현재=%d, 과거=%d)", 
-    //            icp.getFitnessScore(), loopKeyCur, loopKeyPre);
+    RCLCPP_DEBUG(node_->get_logger(), "RS ICP 매칭 성공 - 점수: %.4f (현재=%d, 과거=%d)", 
+               icp.getFitnessScore(), loopKeyCur, loopKeyPre);
 
     // publish corrected cloud
     if (pubIcpKeyFrames->get_subscription_count() != 0)
@@ -864,14 +864,10 @@ void LoopClosure::saveLoopFeatureToDB(int feature_id, pcl::PointCloud<PointType>
     PointTypePose pose = cloudKeyPoses6D->points[feature_id];
     double timestamp = cloudKeyPoses6D->points[feature_id].time;
     
-    RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: SQL 실행 시도", feature_id);
+    RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: 비동기 DB 저장 요청", feature_id);
     
-    // DB에 저장
-    if (db_manager_->addLoopFeature(feature_id, timestamp, pose, cloud)) {
-        RCLCPP_DEBUG(node_->get_logger(), "루프 특징점 ID %d: DB 저장 성공", feature_id);
-    } else {
-        RCLCPP_ERROR(node_->get_logger(), "루프 특징점 ID %d: DB 저장 실패", feature_id);
-    }
+    // DB에 저장 (비동기 방식으로 변경)
+    db_manager_->addLoopFeatureAsync(feature_id, timestamp, pose, cloud);
 }
 
 // DB에서 루프 특징점 로드

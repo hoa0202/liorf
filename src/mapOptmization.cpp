@@ -92,7 +92,7 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
             obstacle_threshold, point_threshold, height_diff_threshold,
             base_frame_id, auto_resize_map
         );
-        
+
         RCLCPP_INFO(this->get_logger(), "Costmap integration initialized with resolution: %.2f, size: %.1fm x %.1fm, origin: (%.2f, %.2f)",
                    costmap_resolution, costmap_width, costmap_height, -costmap_width/2, -costmap_height/2);
 
@@ -193,7 +193,7 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
     
     // 루프 클로저 초기화 - DB 관리자 전달
     loop_closure_ = std::make_unique<LoopClosure>(
-        this,
+        this, 
         historyKeyframeSearchRadius,
         historyKeyframeSearchNum,
         historyKeyframeSearchTimeDiff,
@@ -301,7 +301,7 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
             RCLCPP_DEBUG(this->get_logger(), "Publishing map: Loop closure using DB mode");
         } else if (!surfCloudKeyFrames.empty()) {
             // 기존 메모리 모드
-            loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur);
+        loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur);
             RCLCPP_DEBUG(this->get_logger(), "Publishing map: Loop closure using memory-only mode");
         }
     }
@@ -931,12 +931,9 @@ void mapOptimization::saveKeyFramesAndFactor()
             pcl::PointCloud<PointType>::Ptr thisKeyFrame(new pcl::PointCloud<PointType>());
             pcl::copyPointCloud(*laserCloudSurfLastDS, *thisKeyFrame);
             
-            // 데이터베이스에 저장
-            if (!db_manager_->addKeyFrame(keyframe_id, timeLaserInfoCur, pose, thisKeyFrame)) {
-                RCLCPP_ERROR(this->get_logger(), "키프레임 ID %d를 데이터베이스에 저장하지 못했습니다", keyframe_id);
-            } else {
-                RCLCPP_DEBUG(this->get_logger(), "키프레임 ID %d가 데이터베이스에 저장되었습니다", keyframe_id);
-            }
+            // 데이터베이스에 저장 (비동기 방식으로 변경)
+            db_manager_->addKeyFrameAsync(keyframe_id, timeLaserInfoCur, pose, thisKeyFrame);
+            RCLCPP_DEBUG(this->get_logger(), "키프레임 ID %d 비동기 저장 요청됨", keyframe_id);
             
             // 메모리 관리: 키프레임 수가 지정된 한계를 초과하면 오래된 프레임 정리
             if (static_cast<int>(surfCloudKeyFrames.size()) > active_keyframes_window_size_) {
@@ -957,15 +954,15 @@ void mapOptimization::saveKeyFramesAndFactor()
         if (loop_closure_) {
             if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
                 // DB 모드 - 포즈 정보만 전달
-                pcl::PointCloud<PointType>::Ptr thisRawCloudKeyFrame(new pcl::PointCloud<PointType>());
-                pcl::fromROSMsg(cloudInfo.cloud_deskewed, *thisRawCloudKeyFrame);
+            pcl::PointCloud<PointType>::Ptr thisRawCloudKeyFrame(new pcl::PointCloud<PointType>());
+            pcl::fromROSMsg(cloudInfo.cloud_deskewed, *thisRawCloudKeyFrame);
                 loop_closure_->setInputDataWithDB(cloudKeyPoses3D, cloudKeyPoses6D, timeLaserInfoCur, thisRawCloudKeyFrame);
                 RCLCPP_DEBUG(this->get_logger(), "Loop closure using DB mode");
             } else {
                 // 기존 메모리 모드
                 pcl::PointCloud<PointType>::Ptr thisRawCloudKeyFrame(new pcl::PointCloud<PointType>());
                 pcl::fromROSMsg(cloudInfo.cloud_deskewed, *thisRawCloudKeyFrame);
-                loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur, thisRawCloudKeyFrame);
+            loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur, thisRawCloudKeyFrame);
                 RCLCPP_DEBUG(this->get_logger(), "Loop closure using memory-only mode");
             }
         }
