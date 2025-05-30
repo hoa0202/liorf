@@ -53,13 +53,12 @@ void PublishCloudMsg(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Sha
 class LoopClosure
 {
 public:
-    // 수정된 생성자 - DB 관리자 추가
     LoopClosure(rclcpp::Node* node, 
                 double historyKeyframeSearchRadius,
                 int historyKeyframeSearchNum,
                 double historyKeyframeSearchTimeDiff,
                 double historyKeyframeFitnessScore,
-                DBManager* db_manager = nullptr);
+                DBManager* db_manager);
     ~LoopClosure();
     
     // 루프 클로저 스레드 함수
@@ -111,9 +110,13 @@ public:
 
 private:
     rclcpp::Node* node_;
-    std::unique_ptr<SCManager> sc_manager_; // Scan Context 관리자
-    DBManager* db_manager_; // DB 관리자 참조 추가 (소유권 없음)
-    bool use_db_mode_; // DB 모드 사용 여부
+    std::unique_ptr<SCManager> sc_manager_;
+    DBManager* db_manager_;
+    bool use_db_mode_;
+    
+    // 뮤텍스 추가
+    std::mutex mtx;
+    std::mutex mtxLoopInfo;
     
     // Loop Closure 관련 변수
     pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D;
@@ -122,12 +125,23 @@ private:
     
     bool aLoopIsClosed;
     bool isRunning;
+    bool isThreadRunning;
     double timeLaserInfoCur;
+    
+    // 파라미터들
+    double historyKeyframeSearchRadius;
+    int historyKeyframeSearchNum;
+    double historyKeyframeSearchTimeDiff;
+    double historyKeyframeFitnessScore;
+    double distanceNoiseGain_;
+    double baseLoopSigma_;
+    double maxLoopSigma_;
+    double maxDetectDistance_;
     
     // Loop 관련 변수
     pcl::KdTreeFLANN<PointType>::Ptr kdtreeHistoryKeyPoses;
     std::deque<std_msgs::msg::Float64MultiArray> loopInfoVec;
-    std::map<int, int> loopIndexContainer; // from new to old
+    std::map<int, int> loopIndexContainer;
     std::vector<std::pair<int, int>> loopIndexQueue;
     std::vector<gtsam::Pose3> loopPoseQueue;
     std::vector<gtsam::SharedNoiseModel> loopNoiseQueue;
@@ -135,23 +149,8 @@ private:
     // 다운샘플링 필터
     pcl::VoxelGrid<PointType> downSizeFilterICP;
     
-    // 파라미터
-    double historyKeyframeSearchRadius;
-    int historyKeyframeSearchNum;
-    double historyKeyframeSearchTimeDiff;
-    double historyKeyframeFitnessScore;
-    
-    // 뮤텍스
-    std::mutex mtx;
-    std::mutex mtxLoopInfo;
-    
-    // 스레드 종료 플래그
-    bool isThreadRunning;
-    
-    // 구독
+    // 구독/발행
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr subLoop;
-    
-    // 발행
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubLoopConstraintEdge;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubHistoryKeyFrames;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubIcpKeyFrames;
@@ -159,8 +158,11 @@ private:
     // DB 모드용 헬퍼 함수
     pcl::PointCloud<PointType>::Ptr getKeyFrameFromDB(int keyframe_id);
     
-    // 임시 클라우드 캐시 추가 - 루프 클로저 작업 중에만 사용
+    // 임시 클라우드 캐시
     std::unordered_map<int, pcl::PointCloud<PointType>::Ptr> tempCloudCache;
+    
+    // 거리 기반 가중치 계산 함수
+    double calcSigmaByDistance(double dist, double icpFitness) const;
 };
 
 #endif // LOOPCLOSURE_H 

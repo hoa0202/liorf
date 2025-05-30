@@ -54,9 +54,9 @@ public:
     this->declare_parameter<std::string>("robot_base_frame");
     this->declare_parameter<double>("map_update_interval");
     this->declare_parameter<bool>("enable_line_fitting", false);
-    this->declare_parameter<int>("min_cluster_size_for_line_fitting", 10);
-    this->declare_parameter<double>("cluster_tolerance_factor", 2.5); // resolution * factor
-    this->declare_parameter<double>("line_ransac_distance_threshold_factor", 0.5); // resolution * factor
+    this->declare_parameter<int>("min_cluster_size_for_line_fitting", 5); //10
+    this->declare_parameter<double>("cluster_tolerance_factor", 4.0); // resolution * factor 2.5
+    this->declare_parameter<double>("line_ransac_distance_threshold_factor", 0.8); // resolution * factor 0.5
     this->get_parameter("pointcloud_topic", pointcloud_topic_);
     this->get_parameter("resolution", resolution_);
     this->get_parameter("height_min", height_min_);
@@ -103,6 +103,13 @@ private:
 
     std::lock_guard<std::mutex> lock(map_mutex_);
     *accumulated_map_cloud_ += *cloud_filtered;
+    
+    const size_t MAX_SIZE = 300000;       // 예시값, 상황에 따라 조절
+    const size_t REMOVE_SIZE = 50000;     // 한 번에 버릴 수
+    if (accumulated_map_cloud_->size() > MAX_SIZE) {
+      accumulated_map_cloud_->erase(accumulated_map_cloud_->begin(),
+                                    accumulated_map_cloud_->begin() + REMOVE_SIZE);
+    }
 
     for (const auto& pt : cloud_filtered->points) {
       current_min_x_ = std::min(current_min_x_, (double)pt.x);

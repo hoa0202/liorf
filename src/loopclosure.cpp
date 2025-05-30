@@ -8,15 +8,20 @@ LoopClosure::LoopClosure(rclcpp::Node* node,
                         double historyKeyframeFitnessScore,
                         DBManager* db_manager) 
     : node_(node),
-    aLoopIsClosed(false),
-    isRunning(false),
-    isThreadRunning(true),
-    historyKeyframeSearchRadius(historyKeyframeSearchRadius),
-    historyKeyframeSearchNum(historyKeyframeSearchNum),
-    historyKeyframeSearchTimeDiff(historyKeyframeSearchTimeDiff),
-    historyKeyframeFitnessScore(historyKeyframeFitnessScore),
-    db_manager_(db_manager),
-    use_db_mode_(db_manager != nullptr)
+      db_manager_(db_manager),
+      use_db_mode_(db_manager != nullptr),
+      aLoopIsClosed(false),
+      isRunning(false),
+      isThreadRunning(true),
+      timeLaserInfoCur(0.0),
+      historyKeyframeSearchRadius(historyKeyframeSearchRadius),
+      historyKeyframeSearchNum(historyKeyframeSearchNum),
+      historyKeyframeSearchTimeDiff(historyKeyframeSearchTimeDiff),
+      historyKeyframeFitnessScore(historyKeyframeFitnessScore),
+      distanceNoiseGain_(0.2),
+      baseLoopSigma_(0.1),
+      maxLoopSigma_(1.0),
+      maxDetectDistance_(10.0)
 {
     // 파라미터 로깅
     RCLCPP_INFO(node_->get_logger(), "Loop closure parameters: historyKeyframeSearchRadius=%f, historyKeyframeSearchNum=%d, historyKeyframeSearchTimeDiff=%f, historyKeyframeFitnessScore=%f", 
@@ -121,9 +126,8 @@ pcl::PointCloud<PointType>::Ptr LoopClosure::getKeyFrameFromDB(int keyframe_id) 
 void LoopClosure::clearTemporaryCache() {
     std::lock_guard<std::mutex> lock(mtx);
     if (!tempCloudCache.empty()) {
-        size_t count = tempCloudCache.size();
         tempCloudCache.clear();
-        // RCLCPP_INFO(node_->get_logger(), "★★★ 루프 클로저 임시 캐시 정리: %zu 키프레임 해제됨 ★★★", count);
+        RCLCPP_DEBUG(node_->get_logger(), "루프 클로저 임시 캐시 정리 완료");
     }
 }
 
@@ -359,7 +363,6 @@ void LoopClosure::performSCLoopClosure()
 {
     std::lock_guard<std::mutex> lock(mtx);
     
-    // 이미 RS 루프 클로저가 발생했으면 이번 호출에서는 SC 루프 클로저 처리하지 않음
     if (aLoopIsClosed) {
         return;
     }
@@ -367,12 +370,9 @@ void LoopClosure::performSCLoopClosure()
     if (cloudKeyPoses3D->points.empty())
         return;
 
-    // find keys
-    // first: nn index, second: yaw diff 
     auto detectResult = sc_manager_->detectLoopClosureID(); 
     int loopKeyCur = cloudKeyPoses3D->size() - 1;
     int loopKeyPre = detectResult.first;
-    float yawDiffRad = detectResult.second; // v1에서는 사용하지 않음
     
     if (loopKeyPre == -1)
         return;
@@ -491,78 +491,85 @@ bool LoopClosure::detectLoopClosureDistance(int *latestID, int *closestID)
 
     // DB 모드와 메모리 모드에 따라 다른 방식으로 처리
     if (use_db_mode_ && db_manager_ && db_manager_->isInitialized()) {
-        // DB 모드에서는 공간 검색 쿼리 사용
         PointTypePose currentPose = cloudKeyPoses6D->points[loopKeyCur];
         
-        // 원본 알고리즘과 동일하게 historyKeyframeSearchNum 파라미터 사용
         std::vector<int> candidateKeyframes = db_manager_->loadKeyFramesByRadius(
             currentPose, 
             historyKeyframeSearchRadius, 
-            historyKeyframeSearchNum  // 원본 로직과 동일하게 historyKeyframeSearchNum 사용
+            historyKeyframeSearchNum
         );
         
-        // 쿼리 결과 로그
-        RCLCPP_DEBUG(node_->get_logger(), "루프 클로저 검색: %zu개의 후보 발견 (최대: %d)",
-                    candidateKeyframes.size(), historyKeyframeSearchNum);
-        
-        // 키프레임 인덱스 기준으로 정렬 - 가장 가까운 것부터
+        // 거리 기반으로 후보 정렬
         std::sort(candidateKeyframes.begin(), candidateKeyframes.end(), 
-            [loopKeyCur](int a, int b) {
-                return std::abs(a - loopKeyCur) < std::abs(b - loopKeyCur);
+            [this, loopKeyCur](int a, int b) {
+                double distA = sqrt(pow(cloudKeyPoses3D->points[a].x - cloudKeyPoses3D->points[loopKeyCur].x, 2) +
+                                  pow(cloudKeyPoses3D->points[a].y - cloudKeyPoses3D->points[loopKeyCur].y, 2));
+                double distB = sqrt(pow(cloudKeyPoses3D->points[b].x - cloudKeyPoses3D->points[loopKeyCur].x, 2) +
+                                  pow(cloudKeyPoses3D->points[b].y - cloudKeyPoses3D->points[loopKeyCur].y, 2));
+                return distA < distB;
             });
         
-        // 원본 알고리즘과 동일하게 시간 차이가 충분히 큰 첫 번째 후보만 선택
         for (int i = 0; i < (int)candidateKeyframes.size(); ++i) {
             int id = candidateKeyframes[i];
-            // 자기 자신과는 루프 클로저 하지 않음
             if (id == loopKeyCur) 
                 continue;
             
-            // 키프레임 간의 거리가 일정 이상이어야 함 (너무 가까운 키프레임은 제외)
-            // 최소 10개 이상의 키프레임 차이가 있어야 루프 클로저로 처리
-            if (std::abs(id - loopKeyCur) < 10)
+            // 거리 계산
+            double distance = sqrt(pow(cloudKeyPoses3D->points[id].x - cloudKeyPoses3D->points[loopKeyCur].x, 2) +
+                                 pow(cloudKeyPoses3D->points[id].y - cloudKeyPoses3D->points[loopKeyCur].y, 2));
+            
+            // 최대 감지 거리 체크 (30m로 제한)
+            if (distance > 30.0)
                 continue;
                 
-            // 시간 차이가 충분히 커야만 루프 클로저로 간주
+            // 최소 거리 체크 (너무 가까운 키프레임 제외)
+            if (distance < 5.0)
+                continue;
+            
+            // 시간 차이 체크
             if (abs(cloudKeyPoses6D->points[id].time - timeLaserInfoCur) > historyKeyframeSearchTimeDiff) {
                 loopKeyPre = id;
-                break; // 첫 번째 적합한 후보를 찾으면 중단
+                break;
             }
         }
     } else {
-        // 원래 메모리 모드: KDTree 기반 검색
+        // 메모리 모드 처리
         std::vector<int> pointSearchIndLoop;
         std::vector<float> pointSearchSqDisLoop;
         kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
         kdtreeHistoryKeyPoses->radiusSearch(cloudKeyPoses3D->back(), historyKeyframeSearchRadius, pointSearchIndLoop, pointSearchSqDisLoop, 0);
         
-        // 검색 결과 정렬 - 거리 기준
         std::vector<std::pair<int, float>> candidates;
         for (size_t i = 0; i < pointSearchIndLoop.size(); i++) {
             candidates.push_back(std::make_pair(pointSearchIndLoop[i], pointSearchSqDisLoop[i]));
         }
         
+        // 거리 기반으로 후보 정렬
         std::sort(candidates.begin(), candidates.end(), 
             [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
-                return a.second < b.second;  // 거리 기준 오름차순 정렬
+                return a.second < b.second;
             });
         
-        // 원본 로직과 동일하게 시간 차이가 충분히 큰 첫 번째 후보만 선택
         for (const auto& candidate : candidates) {
             int id = candidate.first;
-            
-            // 자기 자신과는 루프 클로저 하지 않음
             if (id == loopKeyCur) 
                 continue;
             
-            // 키프레임 간의 거리가 일정 이상이어야 함 (너무 가까운 키프레임은 제외)
-            if (std::abs(id - loopKeyCur) < 10)
+            // 거리 계산
+            double distance = sqrt(candidate.second);
+            
+            // 최대 감지 거리 체크 (30m로 제한)
+            if (distance > 30.0)
                 continue;
                 
-            // 시간 차이가 충분히 커야만 루프 클로저로 간주
+            // 최소 거리 체크
+            if (distance < 5.0)
+                continue;
+            
+            // 시간 차이 체크
             if (abs(cloudKeyPoses6D->points[id].time - timeLaserInfoCur) > historyKeyframeSearchTimeDiff) {
                 loopKeyPre = id;
-                break; // 첫 번째 적합한 후보를 찾으면 중단
+                break;
             }
         }
     }
@@ -570,8 +577,10 @@ bool LoopClosure::detectLoopClosureDistance(int *latestID, int *closestID)
     if (loopKeyPre == -1 || loopKeyCur == loopKeyPre)
         return false;
         
-    RCLCPP_DEBUG(node_->get_logger(), "루프 클로저 후보 감지: 현재=%d, 과거=%d (간격: %d)", 
-               loopKeyCur, loopKeyPre, std::abs(loopKeyCur - loopKeyPre));
+    RCLCPP_DEBUG(node_->get_logger(), "루프 클로저 후보 감지: 현재=%d, 과거=%d (간격: %d, 거리: %.2f m)", 
+               loopKeyCur, loopKeyPre, std::abs(loopKeyCur - loopKeyPre),
+               sqrt(pow(cloudKeyPoses3D->points[loopKeyCur].x - cloudKeyPoses3D->points[loopKeyPre].x, 2) +
+                    pow(cloudKeyPoses3D->points[loopKeyCur].y - cloudKeyPoses3D->points[loopKeyPre].y, 2)));
 
     *latestID = loopKeyCur;
     *closestID = loopKeyPre;
@@ -796,6 +805,19 @@ void LoopClosure::visualizeLoopClosure()
     markerEdge.color.r = 0.9; markerEdge.color.g = 0.9; markerEdge.color.b = 0;
     markerEdge.color.a = 1;
 
+    // 신뢰도가 낮은 루프를 위한 마커
+    visualization_msgs::msg::Marker markerEdgeLowConfidence;
+    markerEdgeLowConfidence.header.frame_id = "odom";
+    markerEdgeLowConfidence.header.stamp = node_->now();
+    markerEdgeLowConfidence.action = visualization_msgs::msg::Marker::ADD;
+    markerEdgeLowConfidence.type = visualization_msgs::msg::Marker::LINE_LIST;
+    markerEdgeLowConfidence.ns = "loop_edges_low_confidence";
+    markerEdgeLowConfidence.id = 2;
+    markerEdgeLowConfidence.pose.orientation.w = 1;
+    markerEdgeLowConfidence.scale.x = 0.1;
+    markerEdgeLowConfidence.color.r = 1.0; markerEdgeLowConfidence.color.g = 0.0; markerEdgeLowConfidence.color.b = 0.0;
+    markerEdgeLowConfidence.color.a = 1;
+
     for (auto it = loopIndexContainer.begin(); it != loopIndexContainer.end(); ++it)
     {
         int key_cur = it->first;
@@ -805,16 +827,32 @@ void LoopClosure::visualizeLoopClosure()
         p.y = cloudKeyPoses6D->points[key_cur].y;
         p.z = cloudKeyPoses6D->points[key_cur].z;
         markerNode.points.push_back(p);
-        markerEdge.points.push_back(p);
-        p.x = cloudKeyPoses6D->points[key_pre].x;
-        p.y = cloudKeyPoses6D->points[key_pre].y;
-        p.z = cloudKeyPoses6D->points[key_pre].z;
-        markerNode.points.push_back(p);
-        markerEdge.points.push_back(p);
+        
+        // 거리 계산
+        double distance = sqrt(pow(cloudKeyPoses6D->points[key_cur].x - cloudKeyPoses6D->points[key_pre].x, 2) +
+                             pow(cloudKeyPoses6D->points[key_cur].y - cloudKeyPoses6D->points[key_pre].y, 2));
+        
+        // 20m 이상인 경우 빨간색으로 표시
+        if (distance >= 20.0) {
+            markerEdgeLowConfidence.points.push_back(p);
+            p.x = cloudKeyPoses6D->points[key_pre].x;
+            p.y = cloudKeyPoses6D->points[key_pre].y;
+            p.z = cloudKeyPoses6D->points[key_pre].z;
+            markerEdgeLowConfidence.points.push_back(p);
+        } else {
+            markerEdge.points.push_back(p);
+            p.x = cloudKeyPoses6D->points[key_pre].x;
+            p.y = cloudKeyPoses6D->points[key_pre].y;
+            p.z = cloudKeyPoses6D->points[key_pre].z;
+            markerEdge.points.push_back(p);
+        }
     }
 
     markerArray.markers.push_back(markerNode);
     markerArray.markers.push_back(markerEdge);
+    if (!markerEdgeLowConfidence.points.empty()) {
+        markerArray.markers.push_back(markerEdgeLowConfidence);
+    }
     pubLoopConstraintEdge->publish(markerArray);
 }
 
@@ -854,7 +892,7 @@ void LoopClosure::saveLoopFeatureToDB(int feature_id, pcl::PointCloud<PointType>
     }
 
     // 키프레임 포즈 가져오기
-    if (feature_id >= cloudKeyPoses6D->size()) {
+    if (static_cast<size_t>(feature_id) >= cloudKeyPoses6D->size()) {
         RCLCPP_ERROR(node_->get_logger(), "키프레임 ID(%d)가 범위를 벗어남: 크기=%zu", 
                     feature_id, cloudKeyPoses6D->size());
         return;
@@ -910,4 +948,45 @@ void LoopClosure::updateActiveLoopFeatureWindow(const PointTypePose& current_pos
     }
     
     db_manager_->updateLoopFeatureActiveWindow(current_pose);
+}
+
+double LoopClosure::calcSigmaByDistance(double dist, double icpFitness) const
+{
+    // 기본 노이즈 값
+    double sigma = baseLoopSigma_;
+    
+    // 거리에 따른 가중치 증가
+    if (dist > 0) {
+        // 20m 이상인 경우 가중치를 더 크게 증가
+        if (dist >= 20.0) {
+            sigma += dist * distanceNoiseGain_ * 2.0;  // 20m 이상은 가중치 2배
+        } else {
+            sigma += dist * distanceNoiseGain_;
+        }
+        
+        // 거리가 maxDetectDistance_의 50%를 넘으면 가중치를 더 빠르게 증가
+        if (dist > maxDetectDistance_ * 0.5) {
+            sigma += (dist - maxDetectDistance_ * 0.5) * distanceNoiseGain_ * 3.0;  // 3배로 증가
+        }
+        
+        // ICP 피트니스 스코어에 따른 추가 가중치
+        if (icpFitness > 0) {
+            // 거리가 20m 이상이면 ICP 피트니스의 영향력도 증가
+            if (dist >= 20.0) {
+                sigma += icpFitness * 0.3;
+            } else {
+                sigma += icpFitness * 0.2;
+            }
+        }
+    }
+    
+    // 최대 가중치 제한
+    sigma = std::min(sigma, maxLoopSigma_);
+    
+    // 거리가 너무 멀면 가중치를 최대로 설정
+    if (dist > maxDetectDistance_ * 0.7) {  // 70% 이상이면 최대 가중치 적용
+        sigma = maxLoopSigma_;
+    }
+    
+    return sigma;
 } 
