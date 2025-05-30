@@ -9,7 +9,7 @@ sudo apt-get install -y libsqlite3-dev sqlite3
 echo "===== 소스 설정 ====="
 source ~/.bashrc
 source /opt/ros/humble/setup.bash
-cd ~/liorf_ws2
+cd ~/dblio_ws
 
 echo "===== 빌드 시작 ====="
 colcon build --symlink-install --packages-select liorf

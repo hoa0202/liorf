@@ -1,0 +1,25 @@
+grid_map_generator:
+  ros__parameters:
+    # point cloud 입력 토픽
+    pointcloud_topic: "/remove_global_map"
+
+    # 해상도 (m)
+    resolution: 0.1
+
+    # z축 필터링 범위 (m)
+    height_min: 0.5
+    height_max: 2.0
+
+    # 프레임 설정
+    map_frame: "map"
+    robot_base_frame: "base_link"
+
+    # 그리드 맵 업데이트 주기 (초)
+    map_update_interval: 1.0
+
+
+
+    enable_line_fitting: true
+    min_cluster_size_for_line_fitting: 15  # 예: 최소 15개 셀로 이루어진 클러스터
+    cluster_tolerance_factor: 3.0        # 예: resolution의 3배 거리 내 셀들을 같은 클러스터로
+    line_ransac_distance_threshold_factor: 0.5 # 예: resolution의 0.5배 거리 내 점을 라인 인라이어로

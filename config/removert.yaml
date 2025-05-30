@@ -1,0 +1,18 @@
+removert_node:
+  ros__parameters:
+    # 구독할 global map 토픽
+    global_map_topic: "/liorf/mapping/map_global"
+    # 구독할 로컬 스캔 토픽
+    local_cloud_topic: "/liorf/mapping/cloud_registered_raw"
+    # voxel 크기 (m)
+    voxel_size: 0.3
+    # 동적/정적 구분할 관심 반경 (m)
+    interest_radius: 5.0
+    # 누적 프레임 중 미검출 시 동적으로 간주할 임계 프레임 수
+    frame_threshold: 20
+    # 누적할 로컬 스캔 프레임 수
+    accumulation_frames: 30
+    # 로봇 베이스 프레임
+    robot_base_frame: "base_link"
+    # 동적 포인트를 전역 누적할지 여부
+    accumulate_dynamic_points_globally: true

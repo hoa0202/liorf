@@ -31,7 +31,7 @@
     
     # Export settings
     savePCD: true                             # https://github.com/TixiaoShan/LIO-SAM/issues/3
-    savePCDDirectory: "/liorf_ws2/src/liorf/PCD"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation
+    savePCDDirectory: "/dblio_ws/src/liorf/PCD"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation
 
     # Sensor Settings
     sensor: livox                            # lidar sensor type, 'velodyne' or 'ouster' or 'livox' or 'robosense'
@@ -119,8 +119,8 @@
     use_database_mode: true                       # 데이터베이스 모드 활성화 여부 (true/false)
     database_reset_on_start: true                 # 시작할 때 데이터베이스 초기화 여부 (true: 완전 초기화 모드, false: 연속 매핑 모드)
     localization_mode: false                      # 로컬라이제이션 모드 여부 (true: 기존 맵 유지, false: 새 맵 생성)
-    database_path: "/root/liorf_ws2/src/liorf/maps/slam_map.db" # 경로 수정금지 데이터베이스 파일 경로
-    clouds_directory: "/root/liorf_ws2/src/liorf/maps/clouds"   # 경로 수정금지 포인트 클라우드 저장 디렉토리 경로
+    database_path: "/root/dblio_ws/src/liorf/maps/slam_map.db" # 경로 수정금지 데이터베이스 파일 경로
+    clouds_directory: "/root/dblio_ws/src/liorf/maps/clouds"   # 경로 수정금지 포인트 클라우드 저장 디렉토리 경로
     active_keyframes_window_size: 5               # 메모리에 유지할 최대 키프레임 수 (100에서 5로 변경)
     spatial_query_radius: 50.0                    # 공간 쿼리 반경 (미터)
 
