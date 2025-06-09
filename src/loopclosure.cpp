@@ -142,7 +142,7 @@ void LoopClosure::setInputData(pcl::PointCloud<PointType>::Ptr& keyPoses3D,
     
     // DB 모드가 아닐 때만 서페이스 클라우드 키프레임 복사
     if (!use_db_mode_) {
-        surfCloudKeyFrames = surfKeyFrames;
+    surfCloudKeyFrames = surfKeyFrames;
     }
     
     timeLaserInfoCur = currentTimestamp;
@@ -252,8 +252,8 @@ void LoopClosure::performRSLoopClosure()
             }
         } else {
             // 기존 메모리 방식
-            loopFindNearKeyFrames(cureKeyframeCloud, loopKeyCur, 0, -1);
-            loopFindNearKeyFrames(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum, -1);
+        loopFindNearKeyFrames(cureKeyframeCloud, loopKeyCur, 0, -1);
+        loopFindNearKeyFrames(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum, -1);
         }
         
         if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000) {
@@ -336,7 +336,7 @@ void LoopClosure::performRSLoopClosure()
         gtsam::noiseModel::mEstimator::Cauchy::Create(1), 
         gtsam::noiseModel::Diagonal::Variances(Vector6)
     );
-    
+
     // Add this constraint to graph optimization
     mtxLoopInfo.lock();
     loopIndexQueue.push_back(std::make_pair(loopKeyCur, loopKeyPre));
@@ -531,11 +531,11 @@ bool LoopClosure::detectLoopClosureDistance(int *latestID, int *closestID)
         }
     } else {
         // 원래 메모리 모드: KDTree 기반 검색
-        std::vector<int> pointSearchIndLoop;
-        std::vector<float> pointSearchSqDisLoop;
-        kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
-        kdtreeHistoryKeyPoses->radiusSearch(cloudKeyPoses3D->back(), historyKeyframeSearchRadius, pointSearchIndLoop, pointSearchSqDisLoop, 0);
-        
+    std::vector<int> pointSearchIndLoop;
+    std::vector<float> pointSearchSqDisLoop;
+    kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
+    kdtreeHistoryKeyPoses->radiusSearch(cloudKeyPoses3D->back(), historyKeyframeSearchRadius, pointSearchIndLoop, pointSearchSqDisLoop, 0);
+    
         // 검색 결과 정렬 - 거리 기준
         std::vector<std::pair<int, float>> candidates;
         for (size_t i = 0; i < pointSearchIndLoop.size(); i++) {
@@ -561,7 +561,7 @@ bool LoopClosure::detectLoopClosureDistance(int *latestID, int *closestID)
                 
             // 시간 차이가 충분히 커야만 루프 클로저로 간주
             if (abs(cloudKeyPoses6D->points[id].time - timeLaserInfoCur) > historyKeyframeSearchTimeDiff) {
-                loopKeyPre = id;
+            loopKeyPre = id;
                 break; // 첫 번째 적합한 후보를 찾으면 중단
             }
         }
@@ -745,9 +745,9 @@ void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKey
         // 검색 범위 내 키프레임 추가
         for (int i = -search_count / 2; i <= search_count / 2; ++i) {
             int keyNear = start_idx + i;
-            if (keyNear < 0 || keyNear >= cloudSize)
-                continue;
-                
+        if (keyNear < 0 || keyNear >= cloudSize)
+            continue;
+
             if (keyNear < static_cast<int>(surfCloudKeyFrames.size()) && surfCloudKeyFrames[keyNear]) {
                 *nearKeyframes += *surfCloudKeyFrames[keyNear];
             }
@@ -756,10 +756,10 @@ void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKey
     
     // 다운샘플링
     if (nearKeyframes->points.size() > 1000) {
-        pcl::PointCloud<PointType>::Ptr cloud_temp(new pcl::PointCloud<PointType>());
-        downSizeFilterICP.setInputCloud(nearKeyframes);
-        downSizeFilterICP.filter(*cloud_temp);
-        *nearKeyframes = *cloud_temp;
+    pcl::PointCloud<PointType>::Ptr cloud_temp(new pcl::PointCloud<PointType>());
+    downSizeFilterICP.setInputCloud(nearKeyframes);
+    downSizeFilterICP.filter(*cloud_temp);
+    *nearKeyframes = *cloud_temp;
     }
 }
 

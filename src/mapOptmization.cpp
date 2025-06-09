@@ -198,13 +198,12 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
     
     // 루프 클로저 초기화 - DB 관리자 전달
     loop_closure_ = std::make_unique<LoopClosure>(
-        this, 
+        this,
         historyKeyframeSearchRadius,
         historyKeyframeSearchNum,
         historyKeyframeSearchTimeDiff,
         historyKeyframeFitnessScore,
-        use_database_mode_ ? db_manager_.get() : nullptr  // DB 관리자 전달
-    );
+        use_database_mode_ ? db_manager_.get() : nullptr);
     
     // DB 모드 설정
     if (loop_closure_) {
@@ -329,7 +328,7 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
             // 처리 시간 측정 완료
             auto end_time = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double> elapsed = end_time - start_time;
-            RCLCPP_INFO(this->get_logger(), "매핑 처리 총 시간: %.4f 초", elapsed.count());
+            // RCLCPP_INFO(this->get_logger(), "매핑 처리 총 시간: %.4f 초", elapsed.count());
         }
     
     // 코스트맵 생성기에 데이터 전달
