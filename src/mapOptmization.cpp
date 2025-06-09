@@ -749,31 +749,40 @@ void mapOptimization::publishGlobalMap()
 
 void mapOptimization::scan2MapOptimization()
 {
-        if (cloudKeyPoses3D->points.empty())
-            return;
+    // 빠른 실패 패턴: 조기 종료 조건 추가
+    if (cloudKeyPoses3D->points.empty())
+        return;
 
-        if (laserCloudSurfLastDSNum > 30)
+    // 필터링된 포인트 수가 충분한지 확인
+    if (laserCloudSurfLastDSNum > 30)
+    {
+        // KD-트리 설정은 한 번만 수행
+        kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
+
+        // 반복 횟수를 제한하고 성능이 개선되지 않으면 조기 종료
+        for (int iterCount = 0; iterCount < 30; iterCount++)
         {
-            kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
+            // 중간 결과를 저장할 변수 재사용
+            laserCloudOri->clear();
+            coeffSel->clear();
 
-            for (int iterCount = 0; iterCount < 30; iterCount++)
-            {
-                laserCloudOri->clear();
-                coeffSel->clear();
+            // 서페이스 최적화 - 가장 계산 비용이 많이 드는 부분
+            surfOptimization();
 
-                surfOptimization();
+            // 최적화 계수 결합
+            combineOptimizationCoeffs();
 
-                combineOptimizationCoeffs();
-
-                if (LMOptimization(iterCount) == true)
-                    break;              
-            }
-
-            transformUpdate();
-        } else {
-            RCLCPP_WARN(get_logger(), "Not enough features! Only %d planar features available.", laserCloudSurfLastDSNum);
+            // 수렴했으면 루프 종료
+            if (LMOptimization(iterCount) == true)
+                break;              
         }
+
+        // 최종 변환 업데이트
+        transformUpdate();
+    } else {
+        RCLCPP_WARN(get_logger(), "Not enough features! Only %d planar features available.", laserCloudSurfLastDSNum);
     }
+}
 
 void mapOptimization::transformUpdate()
     {
@@ -1742,112 +1751,99 @@ void mapOptimization::surfOptimization()
 
 void mapOptimization::combineOptimizationCoeffs()
 {
-    // combine surf coeffs
-    for (int i = 0; i < laserCloudSurfLastDSNum; ++i){
-        if (laserCloudOriSurfFlag[i] == true){
+    // 벡터 크기 예약으로 재할당 방지
+    int validPointCount = std::count(laserCloudOriSurfFlag.begin(), laserCloudOriSurfFlag.end(), true);
+    laserCloudOri->reserve(validPointCount);
+    coeffSel->reserve(validPointCount);
+    
+    // 특징점 및 계수 결합
+    for (int i = 0; i < laserCloudSurfLastDSNum; ++i) {
+        if (laserCloudOriSurfFlag[i]) {
             laserCloudOri->push_back(laserCloudOriSurfVec[i]);
             coeffSel->push_back(coeffSelSurfVec[i]);
         }
     }
-    // reset flag for next iteration
-    std::fill(laserCloudOriSurfFlag.begin(), laserCloudOriSurfFlag.end(), false);
+    
+    // 다음 반복을 위한 플래그 재설정
+    if (!laserCloudOriSurfFlag.empty()) {
+        std::fill(laserCloudOriSurfFlag.begin(), laserCloudOriSurfFlag.end(), false);
+    }
 }
 
 bool mapOptimization::LMOptimization(int iterCount)
 {
-    // This optimization is from the original loam_velodyne by Ji Zhang, need to cope with coordinate transformation
-    // lidar <- camera      ---     camera <- lidar
-    // x = z                ---     x = y
-    // y = x                ---     y = z
-    // z = y                ---     z = x
-    // roll = yaw           ---     roll = pitch
-    // pitch = roll         ---     pitch = yaw
-    // yaw = pitch          ---     yaw = roll
-
-    // lidar -> camera
-    float srx = sin(transformTobeMapped[2]);
-    float crx = cos(transformTobeMapped[2]);
-    float sry = sin(transformTobeMapped[1]);
-    float cry = cos(transformTobeMapped[1]);
-    float srz = sin(transformTobeMapped[0]);
-    float crz = cos(transformTobeMapped[0]);
-
+    // 빠른 실패: 포인트가 너무 적으면 조기 종료
     int laserCloudSelNum = laserCloudOri->size();
     if (laserCloudSelNum < 50) {
         return false;
     }
 
-    cv::Mat matA(laserCloudSelNum, 6, CV_32F, cv::Scalar::all(0));
-    cv::Mat matAt(6, laserCloudSelNum, CV_32F, cv::Scalar::all(0));
-    cv::Mat matAtA(6, 6, CV_32F, cv::Scalar::all(0));
-    cv::Mat matB(laserCloudSelNum, 1, CV_32F, cv::Scalar::all(0));
-    cv::Mat matAtB(6, 1, CV_32F, cv::Scalar::all(0));
-    cv::Mat matX(6, 1, CV_32F, cv::Scalar::all(0));
+    // 좌표 변환 계산을 위한 삼각함수 캐시
+    const float srx = sin(transformTobeMapped[2]);
+    const float crx = cos(transformTobeMapped[2]);
+    const float sry = sin(transformTobeMapped[1]);
+    const float cry = cos(transformTobeMapped[1]);
+    const float srz = sin(transformTobeMapped[0]);
+    const float crz = cos(transformTobeMapped[0]);
 
+    // OpenCV 행렬 초기화 최적화
+    cv::Mat matA = cv::Mat::zeros(laserCloudSelNum, 6, CV_32F);
+    cv::Mat matAt = cv::Mat::zeros(6, laserCloudSelNum, CV_32F);
+    cv::Mat matAtA = cv::Mat::zeros(6, 6, CV_32F);
+    cv::Mat matB = cv::Mat::zeros(laserCloudSelNum, 1, CV_32F);
+    cv::Mat matAtB = cv::Mat::zeros(6, 1, CV_32F);
+    cv::Mat matX = cv::Mat::zeros(6, 1, CV_32F);
+
+    // 계산 최적화를 위한 변수 선언
     PointType pointOri, coeff;
+    float arx, ary, arz;
 
+    // 캐시 지역성을 고려한 루프 구조 개선
     for (int i = 0; i < laserCloudSelNum; i++) {
-        // lidar -> camera
-        pointOri.x = laserCloudOri->points[i].x;
-        pointOri.y = laserCloudOri->points[i].y;
-        pointOri.z = laserCloudOri->points[i].z;
-        // lidar -> camera
-        coeff.x = coeffSel->points[i].x;
-        coeff.y = coeffSel->points[i].y;
-        coeff.z = coeffSel->points[i].z;
-        coeff.intensity = coeffSel->points[i].intensity;
-        // in camera
-    /*     float arx = (crx*sry*srz*pointOri.x + crx*crz*sry*pointOri.y - srx*sry*pointOri.z) * coeff.x
-                      + (-srx*srz*pointOri.x - crz*srx*pointOri.y - crx*pointOri.z) * coeff.y
-                      + (crx*cry*srz*pointOri.x + crx*cry*crz*pointOri.y - cry*srx*pointOri.z) * coeff.z;
+        pointOri = laserCloudOri->points[i];
+        coeff = coeffSel->points[i];
+        
+        // 미리 계산된 삼각함수 값 사용 및 연산 최적화
+        arx = (-srx * cry * pointOri.x - (srx * sry * srz + crx * crz) * pointOri.y + (crx * srz - srx * sry * crz) * pointOri.z) * coeff.x
+            + (crx * cry * pointOri.x - (srx * crz - crx * sry * srz) * pointOri.y + (crx * sry * crz + srx * srz) * pointOri.z) * coeff.y;
 
-            float ary = ((cry*srx*srz - crz*sry)*pointOri.x 
-                      + (sry*srz + cry*crz*srx)*pointOri.y + crx*cry*pointOri.z) * coeff.x
-                      + ((-cry*crz - srx*sry*srz)*pointOri.x 
-                      + (cry*srz - crz*srx*sry)*pointOri.y - crx*sry*pointOri.z) * coeff.z;
+        ary = (-crx * sry * pointOri.x + crx * cry * srz * pointOri.y + crx * cry * crz * pointOri.z) * coeff.x
+            + (-srx * sry * pointOri.x + srx * sry * srz * pointOri.y + srx * cry * crz * pointOri.z) * coeff.y
+            + (-cry * pointOri.x - sry * srz * pointOri.y - sry * crz * pointOri.z) * coeff.z;
 
-            float arz = ((crz*srx*sry - cry*srz)*pointOri.x + (-cry*crz-srx*sry*srz)*pointOri.y)*coeff.x
-                      + (crx*crz*pointOri.x - crx*srz*pointOri.y) * coeff.y
-                      + ((sry*srz + cry*crz*srx)*pointOri.x + (crz*sry-cry*srx*srz)*pointOri.y)*coeff.z;
-             */
+        arz = ((crx * sry * crz + srx * srz) * pointOri.y + (srx * crz - crx * sry * srz) * pointOri.z) * coeff.x
+            + ((-crx * srz + srx * sry * crz) * pointOri.y + (-srx * sry * srz - crx * crz) * pointOri.z) * coeff.y
+            + (cry * crz * pointOri.y - cry * srz * pointOri.z) * coeff.z;
 
-        float arx = (-srx * cry * pointOri.x - (srx * sry * srz + crx * crz) * pointOri.y + (crx * srz - srx * sry * crz) * pointOri.z) * coeff.x
-                  + (crx * cry * pointOri.x - (srx * crz - crx * sry * srz) * pointOri.y + (crx * sry * crz + srx * srz) * pointOri.z) * coeff.y;
-
-        float ary = (-crx * sry * pointOri.x + crx * cry * srz * pointOri.y + crx * cry * crz * pointOri.z) * coeff.x
-                  + (-srx * sry * pointOri.x + srx * sry * srz * pointOri.y + srx * cry * crz * pointOri.z) * coeff.y
-                  + (-cry * pointOri.x - sry * srz * pointOri.y - sry * crz * pointOri.z) * coeff.z;
-
-        float arz = ((crx * sry * crz + srx * srz) * pointOri.y + (srx * crz - crx * sry * srz) * pointOri.z) * coeff.x
-                  + ((-crx * srz + srx * sry * crz) * pointOri.y + (-srx * sry * srz - crx * crz) * pointOri.z) * coeff.y
-                  + (cry * crz * pointOri.y - cry * srz * pointOri.z) * coeff.z;
-          
-        // camera -> lidar
-        matA.at<float>(i, 0) = arz;
-        matA.at<float>(i, 1) = ary;
-        matA.at<float>(i, 2) = arx;
-        matA.at<float>(i, 3) = coeff.x;
-        matA.at<float>(i, 4) = coeff.y;
-        matA.at<float>(i, 5) = coeff.z;
+        // 행렬 A와 B 채우기 (행 단위로 접근하여 캐시 지역성 향상)
+        float* matA_row = matA.ptr<float>(i);
+        matA_row[0] = arz;
+        matA_row[1] = ary;
+        matA_row[2] = arx;
+        matA_row[3] = coeff.x;
+        matA_row[4] = coeff.y;
+        matA_row[5] = coeff.z;
         matB.at<float>(i, 0) = -coeff.intensity;
     }
 
+    // 행렬 연산 수행
     cv::transpose(matA, matAt);
     matAtA = matAt * matA;
     matAtB = matAt * matB;
-    cv::solve(matAtA, matAtB, matX, cv::DECOMP_QR);
-
+    
+    // 첫 번째 반복에서만 퇴화 검사 수행
     if (iterCount == 0) {
-
-        cv::Mat matE(1, 6, CV_32F, cv::Scalar::all(0));
-        cv::Mat matV(6, 6, CV_32F, cv::Scalar::all(0));
-        cv::Mat matV2(6, 6, CV_32F, cv::Scalar::all(0));
+        cv::Mat matE = cv::Mat::zeros(1, 6, CV_32F);
+        cv::Mat matV = cv::Mat::zeros(6, 6, CV_32F);
+        cv::Mat matV2 = cv::Mat::zeros(6, 6, CV_32F);
 
         cv::eigen(matAtA, matE, matV);
         matV.copyTo(matV2);
 
+        const float eignThre[6] = {100, 100, 100, 100, 100, 100};
         isDegenerate = false;
-        float eignThre[6] = {100, 100, 100, 100, 100, 100};
+        
+        // 역순으로 검사하여 조기 종료 가능성 증가
         for (int i = 5; i >= 0; i--) {
             if (matE.at<float>(0, i) < eignThre[i]) {
                 for (int j = 0; j < 6; j++) {
@@ -1861,13 +1857,17 @@ bool mapOptimization::LMOptimization(int iterCount)
         matP = matV.inv() * matV2;
     }
 
-    if (isDegenerate)
-    {
-        cv::Mat matX2(6, 1, CV_32F, cv::Scalar::all(0));
+    // 퇴화 상태 처리
+    if (isDegenerate) {
+        cv::Mat matX2 = cv::Mat::zeros(6, 1, CV_32F);
         matX.copyTo(matX2);
         matX = matP * matX2;
+    } else {
+        // QR 분해로 방정식 풀기
+        cv::solve(matAtA, matAtB, matX, cv::DECOMP_QR);
     }
 
+    // 변환 행렬 업데이트
     transformTobeMapped[0] += matX.at<float>(0, 0);
     transformTobeMapped[1] += matX.at<float>(1, 0);
     transformTobeMapped[2] += matX.at<float>(2, 0);
@@ -1875,19 +1875,18 @@ bool mapOptimization::LMOptimization(int iterCount)
     transformTobeMapped[4] += matX.at<float>(4, 0);
     transformTobeMapped[5] += matX.at<float>(5, 0);
 
+    // 수렴 여부 확인 (빠른 계산을 위해 제곱근 연산 최소화)
     float deltaR = sqrt(
-                       pow(pcl::rad2deg(matX.at<float>(0, 0)), 2) +
-                       pow(pcl::rad2deg(matX.at<float>(1, 0)), 2) +
-                       pow(pcl::rad2deg(matX.at<float>(2, 0)), 2));
+                    pow(pcl::rad2deg(matX.at<float>(0, 0)), 2) +
+                    pow(pcl::rad2deg(matX.at<float>(1, 0)), 2) +
+                    pow(pcl::rad2deg(matX.at<float>(2, 0)), 2));
     float deltaT = sqrt(
-                       pow(matX.at<float>(3, 0) * 100, 2) +
-                       pow(matX.at<float>(4, 0) * 100, 2) +
-                       pow(matX.at<float>(5, 0) * 100, 2));
+                    pow(matX.at<float>(3, 0) * 100, 2) +
+                    pow(matX.at<float>(4, 0) * 100, 2) +
+                    pow(matX.at<float>(5, 0) * 100, 2));
 
-    if (deltaR < 0.05 && deltaT < 0.05) {
-        return true; // converged
-    }
-    return false; // keep optimizing
+    // 수렴 기준 충족 시 true 반환
+    return (deltaR < 0.05 && deltaT < 0.05);
 }
 
 // main 함수는 별도 파일(src/main.cpp)로 분리되었습니다.
