@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.5)
 project(liorf)
 
-set(CMAKE_BUILD_TYPE "Release")
+# 최소 최적화와 디버깅 정보 추가
+set(CMAKE_BUILD_TYPE "RelWithDebInfo")
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -pthread")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O1 -g -Wall -pthread")
 
 # 헤더 프리컴파일 활성화
 include(CheckCXXCompilerFlag)
@@ -24,6 +25,9 @@ endif()
 
 # 링커 최적화 옵션 추가
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--as-needed")
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--as-needed")
+
+# LTO 비활성화 (메모리 오류 방지)
 
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
@@ -104,6 +108,9 @@ file(GLOB common_lib "lib/*.cpp")
 # Range Image Projection
 add_executable(${PROJECT_NAME}_imageProjection src/imageProjection.cpp ${common_lib})
 ament_target_dependencies(${PROJECT_NAME}_imageProjection ${ros2_lib})
+target_compile_options(${PROJECT_NAME}_imageProjection PRIVATE 
+  ${OpenMP_CXX_FLAGS}
+)
 target_link_libraries(${PROJECT_NAME}_imageProjection "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
 
 # Mapping Optimization Library
@@ -115,7 +122,9 @@ add_library(${PROJECT_NAME}_mapOptmization_lib SHARED
   ${common_lib} 
   include/Scancontext.cpp
 )
-target_compile_options(${PROJECT_NAME}_mapOptmization_lib PRIVATE ${OpenMP_CXX_FLAGS})
+target_compile_options(${PROJECT_NAME}_mapOptmization_lib PRIVATE 
+  ${OpenMP_CXX_FLAGS}
+)
 if(USE_PCH)
   target_precompile_headers(${PROJECT_NAME}_mapOptmization_lib PRIVATE 
     <pcl/point_cloud.h>
@@ -129,12 +138,18 @@ target_link_libraries(${PROJECT_NAME}_mapOptmization_lib Boost::timer "${cpp_typ
 
 # Mapping Optimization Executable
 add_executable(${PROJECT_NAME}_mapOptmization src/main.cpp)
+target_compile_options(${PROJECT_NAME}_mapOptmization PRIVATE 
+  ${OpenMP_CXX_FLAGS}
+)
 target_link_libraries(${PROJECT_NAME}_mapOptmization ${PROJECT_NAME}_mapOptmization_lib)
 ament_target_dependencies(${PROJECT_NAME}_mapOptmization ${ros2_lib})
 
 # # IMU Preintegration
 add_executable(${PROJECT_NAME}_imuPreintegration src/imuPreintegration.cpp ${common_lib})
 ament_target_dependencies(${PROJECT_NAME}_imuPreintegration ${ros2_lib})
+target_compile_options(${PROJECT_NAME}_imuPreintegration PRIVATE 
+  ${OpenMP_CXX_FLAGS}
+)
 target_link_libraries(${PROJECT_NAME}_imuPreintegration Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} gtsam)
 
 install(
