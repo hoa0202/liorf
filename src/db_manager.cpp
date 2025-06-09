@@ -358,6 +358,10 @@ bool DBManager::addKeyFrame(int keyframe_id, double timestamp, const PointTypePo
         return false;
     }
     
+    // 처리 시간 측정 시작
+    auto start_time = std::chrono::high_resolution_clock::now();
+    auto cloud_save_start = start_time;
+    
     std::lock_guard<std::mutex> lock(mutex_);
     
     // 포인트 클라우드 파일 저장
@@ -369,6 +373,9 @@ bool DBManager::addKeyFrame(int keyframe_id, double timestamp, const PointTypePo
         }
         cloud_file = getCloudFilePath(keyframe_id);
     }
+    
+    auto meta_save_start = std::chrono::high_resolution_clock::now();
+    auto cloud_save_time = std::chrono::duration<double>(meta_save_start - cloud_save_start).count();
     
     // 키프레임 정보 저장
     std::string sql = "INSERT OR REPLACE INTO keyframes (id, timestamp, x, y, z, roll, pitch, yaw, cloud_file, num_points) "
@@ -401,6 +408,9 @@ bool DBManager::addKeyFrame(int keyframe_id, double timestamp, const PointTypePo
         return false;
     }
     
+    auto rtree_start = std::chrono::high_resolution_clock::now();
+    auto meta_save_time = std::chrono::duration<double>(rtree_start - meta_save_start).count();
+    
     // R-tree 인덱스 업데이트
     // 간단히 구현하기 위해 위치를 기준으로 작은 박스(1m x 1m x 1m) 생성
     float box_size = 1.0f; // 1미터 박스
@@ -429,6 +439,9 @@ bool DBManager::addKeyFrame(int keyframe_id, double timestamp, const PointTypePo
         return false;
     }
     
+    auto cache_start = std::chrono::high_resolution_clock::now();
+    auto rtree_time = std::chrono::duration<double>(cache_start - rtree_start).count();
+    
     // 메모리 캐시 업데이트
     if (cloud && cloud->size() > 0) {
         cloud_cache_[keyframe_id] = cloud;
@@ -442,6 +455,17 @@ bool DBManager::addKeyFrame(int keyframe_id, double timestamp, const PointTypePo
     // 메모리 제한 적용
     enforceMemoryLimit();
     
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto cache_time = std::chrono::duration<double>(end_time - cache_start).count();
+    auto total_time = std::chrono::duration<double>(end_time - start_time).count();
+    
+    // 키프레임 저장 시간이 0.05초 이상일 때만 로깅
+    if (total_time > 0.05) {
+        RCLCPP_INFO(node_->get_logger(), 
+            "DB 키프레임 저장시간(초) - 총:%.4f, 클라우드:%.4f, 메타데이터:%.4f, R-tree:%.4f, 캐시:%.4f, ID:%d", 
+            total_time, cloud_save_time, meta_save_time, rtree_time, cache_time, keyframe_id);
+    }
+    
     return true;
 }
 
@@ -451,18 +475,23 @@ pcl::PointCloud<PointType>::Ptr DBManager::loadCloud(int keyframe_id) {
         return nullptr;
     }
     
+    // 처리 시간 측정 시작
+    auto start_time = std::chrono::high_resolution_clock::now();
+    
     std::lock_guard<std::mutex> lock(mutex_);
     
     // 먼저 메모리 캐시에서 확인
     auto it = cloud_cache_.find(keyframe_id);
     if (it != cloud_cache_.end() && it->second) {
-        // 캐시 히트 로그 제거
+        // 캐시 히트시 시간 측정 생략
         return it->second;
     }
     
     // 캐시에 없으면 데이터베이스에서 조회
     // 로그 레벨을 ERROR에서 DEBUG로 변경 - 로그가 너무 많이 출력되는 것 방지
     RCLCPP_DEBUG(node_->get_logger(), "DB 로드: 키프레임 ID=%d", keyframe_id);
+    
+    auto meta_start = std::chrono::high_resolution_clock::now();
     
     std::string sql = "SELECT cloud_file FROM keyframes WHERE id = ?;";
     
@@ -491,12 +520,18 @@ pcl::PointCloud<PointType>::Ptr DBManager::loadCloud(int keyframe_id) {
     
     sqlite3_finalize(stmt);
     
+    auto cloud_load_start = std::chrono::high_resolution_clock::now();
+    auto meta_time = std::chrono::duration<double>(cloud_load_start - meta_start).count();
+    
     // 파일에서 포인트 클라우드 로드
     auto cloud = loadCloudFromFile(keyframe_id);
     if (!cloud || cloud->empty()) {
         RCLCPP_ERROR(node_->get_logger(), "포인트 클라우드 로드 실패: ID=%d", keyframe_id);
         return nullptr;
     }
+    
+    auto cache_start = std::chrono::high_resolution_clock::now();
+    auto cloud_load_time = std::chrono::duration<double>(cache_start - cloud_load_start).count();
     
     // 로그 추가 - DB에서 성공적으로 로드됨 (DEBUG 레벨로 변경)
     RCLCPP_DEBUG(node_->get_logger(), "★★★ DB 로드 완료: 키프레임 ID=%d (포인트 수: %zu) ★★★", 
@@ -513,6 +548,17 @@ pcl::PointCloud<PointType>::Ptr DBManager::loadCloud(int keyframe_id) {
     
     // 메모리 제한 적용
     enforceMemoryLimit();
+    
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto cache_time = std::chrono::duration<double>(end_time - cache_start).count();
+    auto total_time = std::chrono::duration<double>(end_time - start_time).count();
+    
+    // 로드 시간이 0.05초 이상일 때만 로깅
+    if (total_time > 0.05) {
+        RCLCPP_INFO(node_->get_logger(), 
+            "DB 키프레임 로드시간(초) - 총:%.4f, 메타조회:%.4f, 파일로드:%.4f, 캐시업데이트:%.4f, ID:%d, 포인트:%zu", 
+            total_time, meta_time, cloud_load_time, cache_time, keyframe_id, cloud->size());
+    }
     
     return cloud;
 }

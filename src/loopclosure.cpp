@@ -78,12 +78,39 @@ void LoopClosure::loopClosureThread()
     {
         rate.sleep();
         
+        // 처리 시간 측정
+        auto start_time = std::chrono::high_resolution_clock::now();
+        auto rs_start = start_time;
+        
+        // RS 루프 클로저 수행
         performRSLoopClosure();
+        
+        auto sc_start = std::chrono::high_resolution_clock::now();
+        auto rs_time = std::chrono::duration<double>(sc_start - rs_start).count();
+        
+        // SC 루프 클로저 수행
         performSCLoopClosure();
+        
+        auto vis_start = std::chrono::high_resolution_clock::now();
+        auto sc_time = std::chrono::duration<double>(vis_start - sc_start).count();
+        
+        // 시각화 수행
         visualizeLoopClosure();
+        
+        auto cache_start = std::chrono::high_resolution_clock::now();
+        auto vis_time = std::chrono::duration<double>(cache_start - vis_start).count();
         
         // 임시 캐시 정리
         clearTemporaryCache();
+        
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto cache_time = std::chrono::duration<double>(end_time - cache_start).count();
+        auto total_time = std::chrono::duration<double>(end_time - start_time).count();
+        
+        // 처리 시간 로깅
+        RCLCPP_INFO(node_->get_logger(), 
+            "루프 클로저 처리시간(초) - 총:%.4f, RS검출:%.4f, SC검출:%.4f, 시각화:%.4f, 캐시정리:%.4f",
+            total_time, rs_time, sc_time, vis_time, cache_time);
         
         // Clear loop flag
         aLoopIsClosed = false;

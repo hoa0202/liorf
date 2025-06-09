@@ -267,68 +267,129 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
             timeLastProcessing = timeLaserInfoCur;
 
             // 처리 시간 측정 시작
-            auto start_time = std::chrono::high_resolution_clock::now();
+            auto total_start_time = std::chrono::high_resolution_clock::now();
+            auto step_start_time = std::chrono::high_resolution_clock::now();
+            auto step_end_time = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double> step_elapsed;
+            
+            // 각 단계별 처리 시간 저장 변수
+            double init_guess_time = 0.0;
+            double extract_keyframes_time = 0.0;
+            double downsample_time = 0.0;
+            double scan2map_time = 0.0;
+            double save_keyframes_time = 0.0;
+            double correct_poses_time = 0.0;
+            double clear_frames_time = 0.0;
+            double publish_odom_time = 0.0;
+            double publish_frames_time = 0.0;
             
             // 멀티스레딩 처리를 위한 퓨처 객체들
             std::future<void> initialGuessFuture;
             std::future<void> surroundingKeyFramesFuture;
             std::future<void> downsampleFuture;
             
-            // Step 1: 초기 추정치 업데이트와 주변 키프레임 추출을 병렬로 수행
+            // Step 1: 초기 추정치 업데이트
+            step_start_time = std::chrono::high_resolution_clock::now();
             initialGuessFuture = std::async(std::launch::async, [this]() {
                 this->updateInitialGuess();
             });
-            
-            // Step 2: 주변 키프레임 추출은 초기 추정치가 필요할 수 있으므로 순차적으로 처리
             initialGuessFuture.wait();
+            step_end_time = std::chrono::high_resolution_clock::now();
+            step_elapsed = step_end_time - step_start_time;
+            init_guess_time = step_elapsed.count();
+            
+            // Step 2: 주변 키프레임 추출
+            step_start_time = std::chrono::high_resolution_clock::now();
             surroundingKeyFramesFuture = std::async(std::launch::async, [this]() {
                 this->extractSurroundingKeyFrames();
             });
             
             // Step 3: 현재 스캔 다운샘플링은 독립적으로 수행 가능
+            auto downsample_start = std::chrono::high_resolution_clock::now();
             downsampleFuture = std::async(std::launch::async, [this]() {
                 this->downsampleCurrentScan();
             });
             
-            // 주변 키프레임 추출과 다운샘플링이 완료될 때까지 대기
+            // 주변 키프레임 추출 완료 시간 측정
             surroundingKeyFramesFuture.wait();
+            step_end_time = std::chrono::high_resolution_clock::now();
+            step_elapsed = step_end_time - step_start_time;
+            extract_keyframes_time = step_elapsed.count();
+            
+            // 다운샘플링 완료 시간 측정
             downsampleFuture.wait();
+            auto downsample_end = std::chrono::high_resolution_clock::now();
+            step_elapsed = downsample_end - downsample_start;
+            downsample_time = step_elapsed.count();
             
-            // Step 4: 스캔-맵 최적화는 이전 단계들에 의존하므로 순차적으로 실행
+            // Step 4: 스캔-맵 최적화
+            step_start_time = std::chrono::high_resolution_clock::now();
             scan2MapOptimization();
+            step_end_time = std::chrono::high_resolution_clock::now();
+            step_elapsed = step_end_time - step_start_time;
+            scan2map_time = step_elapsed.count();
             
-            // Step 5: 키프레임 저장 및 포즈 수정은 병렬로 수행 가능
+            // Step 5: 키프레임 저장 및 포즈 수정
+            step_start_time = std::chrono::high_resolution_clock::now();
             std::future<void> saveKeyFramesFuture = std::async(std::launch::async, [this]() {
                 this->saveKeyFramesAndFactor();
             });
-            
             saveKeyFramesFuture.wait();
+            step_end_time = std::chrono::high_resolution_clock::now();
+            step_elapsed = step_end_time - step_start_time;
+            save_keyframes_time = step_elapsed.count();
             
             // Step 6: 포즈 수정 및 경로 업데이트
+            step_start_time = std::chrono::high_resolution_clock::now();
             correctPoses();
+            step_end_time = std::chrono::high_resolution_clock::now();
+            step_elapsed = step_end_time - step_start_time;
+            correct_poses_time = step_elapsed.count();
             
-            // Step 7: 오래된 프레임 정리와 오도메트리/프레임 발행은 병렬로 수행 가능
+            // Step 7: 오래된 프레임 정리
+            auto clear_start = std::chrono::high_resolution_clock::now();
             std::future<void> clearOldFramesFuture = std::async(std::launch::async, [this]() {
                 this->clearOldFrames();
             });
             
+            // Step 8: 오도메트리 발행
+            auto odom_start = std::chrono::high_resolution_clock::now();
             std::future<void> publishOdometryFuture = std::async(std::launch::async, [this]() {
                 this->publishOdometry();
             });
             
+            // Step 9: 프레임 발행
+            auto frames_start = std::chrono::high_resolution_clock::now();
             std::future<void> publishFramesFuture = std::async(std::launch::async, [this]() {
                 this->publishFrames();
             });
             
-            // 모든 작업이 완료될 때까지 대기
+            // 각 작업 완료 시간 측정
             clearOldFramesFuture.wait();
+            auto clear_end = std::chrono::high_resolution_clock::now();
+            step_elapsed = clear_end - clear_start;
+            clear_frames_time = step_elapsed.count();
+            
             publishOdometryFuture.wait();
+            auto odom_end = std::chrono::high_resolution_clock::now();
+            step_elapsed = odom_end - odom_start;
+            publish_odom_time = step_elapsed.count();
+            
             publishFramesFuture.wait();
+            auto frames_end = std::chrono::high_resolution_clock::now();
+            step_elapsed = frames_end - frames_start;
+            publish_frames_time = step_elapsed.count();
             
             // 처리 시간 측정 완료
-            auto end_time = std::chrono::high_resolution_clock::now();
-            std::chrono::duration<double> elapsed = end_time - start_time;
-            // RCLCPP_INFO(this->get_logger(), "매핑 처리 총 시간: %.4f 초", elapsed.count());
+            auto total_end_time = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double> total_elapsed = total_end_time - total_start_time;
+            
+            // 상세 처리 시간 로깅
+            RCLCPP_INFO(this->get_logger(), 
+                "매핑 처리시간(초) - 총:%.4f, 초기화:%.4f, 키프레임추출:%.4f, 다운샘플:%.4f, 스캔매칭:%.4f, 키프레임저장:%.4f, 포즈수정:%.4f, 정리:%.4f, 오도발행:%.4f, 프레임발행:%.4f", 
+                total_elapsed.count(), init_guess_time, extract_keyframes_time, downsample_time, 
+                scan2map_time, save_keyframes_time, correct_poses_time, 
+                clear_frames_time, publish_odom_time, publish_frames_time);
         }
     
     // 코스트맵 생성기에 데이터 전달
