@@ -165,6 +165,7 @@ public:
     float mappingSurfLeafSize ;
     float surroundingKeyframeMapLeafSize;
     float loopClosureICPSurfLeafSize ;
+    float odometrySurfLeafSize;
 
     float z_tollerance; 
     float rotation_tollerance;
@@ -312,6 +313,8 @@ public:
         get_parameter("mappingSurfLeafSize", mappingSurfLeafSize);
         declare_parameter<float>("surroundingKeyframeMapLeafSize", 0.2f);
         get_parameter("surroundingKeyframeMapLeafSize", surroundingKeyframeMapLeafSize);
+        declare_parameter<float>("odometrySurfLeafSize", 0.4f);
+        get_parameter("odometrySurfLeafSize", odometrySurfLeafSize);
         declare_parameter<float>("z_tollerance", 1000.0f);
         get_parameter("z_tollerance", z_tollerance);
         declare_parameter<float>("rotation_tollerance", 1000.0f);

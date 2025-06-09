@@ -210,6 +210,8 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
         loop_closure_->setDBMode(use_database_mode_);
         RCLCPP_INFO(this->get_logger(), "Loop Closure 모듈 DB 모드: %s", use_database_mode_ ? "활성화" : "비활성화");
     }
+
+    mappingProcessInterval = mappingProcessInterval;
 }
 
 void mapOptimization::allocateMemory()
