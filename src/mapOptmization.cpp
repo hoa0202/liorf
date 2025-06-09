@@ -27,6 +27,11 @@
 #include "costmap.h" // 코스트맵 생성기 클래스 헤더 추가
 #include "loopclosure.h" // Loop Closure 클래스 헤더 추가
 
+// 멀티스레딩을 위한 헤더 추가
+#include <future>
+#include <thread>
+#include <functional>
+
 #include "mapOptimization.h"
 
 mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamServer("liorf_mapOptimization", options)
@@ -262,26 +267,69 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
         if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval) {
             timeLastProcessing = timeLaserInfoCur;
 
-            updateInitialGuess();
-
-            // 주변 키프레임 추출 - 함수 복원
-            extractSurroundingKeyFrames();
-
-            // 포인트 클라우드 다운샘플링으로 메모리 사용량 및 계산량 감소
-            downsampleCurrentScan();
-
+            // 처리 시간 측정 시작
+            auto start_time = std::chrono::high_resolution_clock::now();
+            
+            // 멀티스레딩 처리를 위한 퓨처 객체들
+            std::future<void> initialGuessFuture;
+            std::future<void> surroundingKeyFramesFuture;
+            std::future<void> downsampleFuture;
+            
+            // Step 1: 초기 추정치 업데이트와 주변 키프레임 추출을 병렬로 수행
+            initialGuessFuture = std::async(std::launch::async, [this]() {
+                this->updateInitialGuess();
+            });
+            
+            // Step 2: 주변 키프레임 추출은 초기 추정치가 필요할 수 있으므로 순차적으로 처리
+            initialGuessFuture.wait();
+            surroundingKeyFramesFuture = std::async(std::launch::async, [this]() {
+                this->extractSurroundingKeyFrames();
+            });
+            
+            // Step 3: 현재 스캔 다운샘플링은 독립적으로 수행 가능
+            downsampleFuture = std::async(std::launch::async, [this]() {
+                this->downsampleCurrentScan();
+            });
+            
+            // 주변 키프레임 추출과 다운샘플링이 완료될 때까지 대기
+            surroundingKeyFramesFuture.wait();
+            downsampleFuture.wait();
+            
+            // Step 4: 스캔-맵 최적화는 이전 단계들에 의존하므로 순차적으로 실행
             scan2MapOptimization();
-
-            saveKeyFramesAndFactor();
-
+            
+            // Step 5: 키프레임 저장 및 포즈 수정은 병렬로 수행 가능
+            std::future<void> saveKeyFramesFuture = std::async(std::launch::async, [this]() {
+                this->saveKeyFramesAndFactor();
+            });
+            
+            saveKeyFramesFuture.wait();
+            
+            // Step 6: 포즈 수정 및 경로 업데이트
             correctPoses();
-
-            // 메모리 관리: 너무 오래된 프레임 제거
-            clearOldFrames();
-
-            publishOdometry();
-
-            publishFrames();
+            
+            // Step 7: 오래된 프레임 정리와 오도메트리/프레임 발행은 병렬로 수행 가능
+            std::future<void> clearOldFramesFuture = std::async(std::launch::async, [this]() {
+                this->clearOldFrames();
+            });
+            
+            std::future<void> publishOdometryFuture = std::async(std::launch::async, [this]() {
+                this->publishOdometry();
+            });
+            
+            std::future<void> publishFramesFuture = std::async(std::launch::async, [this]() {
+                this->publishFrames();
+            });
+            
+            // 모든 작업이 완료될 때까지 대기
+            clearOldFramesFuture.wait();
+            publishOdometryFuture.wait();
+            publishFramesFuture.wait();
+            
+            // 처리 시간 측정 완료
+            auto end_time = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double> elapsed = end_time - start_time;
+            RCLCPP_INFO(this->get_logger(), "매핑 처리 총 시간: %.4f 초", elapsed.count());
         }
     
     // 코스트맵 생성기에 데이터 전달
@@ -289,21 +337,29 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
         // PCL의 points 멤버를 std::vector<PointTypePose>로 변환
         std::vector<PointTypePose> keyPoses6DVector(cloudKeyPoses6D->points.begin(), cloudKeyPoses6D->points.end());
         
-        // 코스트맵 데이터 업데이트
-        costmap_generator_->processClouds(cloudKeyPoses3D, surfCloudKeyFrames, keyPoses6DVector);
+        // 코스트맵 데이터 업데이트 - 비동기적으로 실행
+        auto costmapFuture = std::async(std::launch::async, [this, keyPoses6DVector]() {
+            this->costmap_generator_->processClouds(this->cloudKeyPoses3D, this->surfCloudKeyFrames, keyPoses6DVector);
+        });
+        // 결과를 사용하지 않지만, 나중에 필요할 경우 사용할 수 있도록 유지합니다.
+        (void)costmapFuture;
     }
     
-    // Loop Closure 모듈에 데이터 전달
+    // Loop Closure 모듈에 데이터 전달 - 비동기적으로 실행
     if (loop_closure_ && cloudKeyPoses3D && cloudKeyPoses6D) {
-        if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
-            // DB 모드 - 포즈 정보만 전달
-            loop_closure_->setInputDataWithDB(cloudKeyPoses3D, cloudKeyPoses6D, timeLaserInfoCur);
-            RCLCPP_DEBUG(this->get_logger(), "Publishing map: Loop closure using DB mode");
-        } else if (!surfCloudKeyFrames.empty()) {
-            // 기존 메모리 모드
-        loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur);
-            RCLCPP_DEBUG(this->get_logger(), "Publishing map: Loop closure using memory-only mode");
-        }
+        auto loopClosureFuture = std::async(std::launch::async, [this]() {
+            if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
+                // DB 모드 - 포즈 정보만 전달
+                loop_closure_->setInputDataWithDB(cloudKeyPoses3D, cloudKeyPoses6D, timeLaserInfoCur);
+                RCLCPP_DEBUG(this->get_logger(), "Publishing map: Loop closure using DB mode");
+            } else if (!surfCloudKeyFrames.empty()) {
+                // 기존 메모리 모드
+                loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur);
+                RCLCPP_DEBUG(this->get_logger(), "Publishing map: Loop closure using memory-only mode");
+            }
+        });
+        // 결과를 사용하지 않지만, 나중에 필요할 경우 사용할 수 있도록 유지합니다.
+        (void)loopClosureFuture;
     }
 }
 

@@ -108,7 +108,7 @@
     historyKeyframeSearchTimeDiff: 15.0           # seconds, key frame that is n seconds older will be considered for loop closure
     historyKeyframeSearchNum: 25                  # number of hostory key frames will be fused into a submap for loop closure
     loopClosureICPSurfLeafSize: 0.3               # downsample icp point cloud  
-    historyKeyframeFitnessScore: 0.1              # icp threshold, the smaller the better alignment
+    historyKeyframeFitnessScore: 0.2              # icp threshold, the smaller the better alignment
 
     # Visualization
     globalMapVisualizationSearchRadius: 200.0    # meters, global map visualization radius
@@ -130,7 +130,7 @@
     costmap_height: 20.0                          # 코스트맵 높이 (미터)
     min_height_threshold: 0.15                    # 최소 높이 임계값 (미터)
     max_height_threshold: 1.1                     # 최대 높이 임계값 (미터)
-    obstacle_threshold: 2                         # 장애물 감지 임계값
+    obstacle_threshold: 2                         # 장애물 감지 임계
     point_threshold: 1                            # 포인트 감지 임계값
     height_diff_threshold: 0.01                   # 높이 차이 임계값 (미터)
     base_frame_id: "base_link"                    # 기준 프레임 ID
