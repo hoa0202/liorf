@@ -1654,68 +1654,87 @@ void mapOptimization::surfOptimization()
 {
     updatePointAssociateToMap();
 
-    #pragma omp parallel for num_threads(numberOfCores)
+    // OpenMP 스케줄링 최적화: guided는 작업을 더 효율적으로 분배
+    #pragma omp parallel for num_threads(numberOfCores) schedule(guided, 16)
     for (int i = 0; i < laserCloudSurfLastDSNum; i++)
     {
         PointType pointOri, pointSel, coeff;
-        std::vector<int> pointSearchInd;
-        std::vector<float> pointSearchSqDis;
+        std::vector<int> pointSearchInd(5);  // 미리 크기 할당으로 재할당 방지
+        std::vector<float> pointSearchSqDis(5);
 
+        // 지역 변수로 처리 (캐시 지역성 향상)
         pointOri = laserCloudSurfLastDS->points[i];
         pointAssociateToMap(&pointOri, &pointSel); 
-        kdtreeSurfFromMap->nearestKSearch(pointSel, 5, pointSearchInd, pointSearchSqDis);
+        
+        // 검색 실패 시 빠르게 건너뛰기
+        if (!kdtreeSurfFromMap->nearestKSearch(pointSel, 5, pointSearchInd, pointSearchSqDis))
+            continue;
 
+        // 빠른 필터링: 5번째 포인트가 너무 멀면 바로 스킵 (불필요한 계산 방지)
+        if (pointSearchSqDis[4] >= 1.0)
+            continue;
+
+        // 매트릭스 계산 최적화
         Eigen::Matrix<float, 5, 3> matA0;
         Eigen::Matrix<float, 5, 1> matB0;
         Eigen::Vector3f matX0;
 
         matA0.setZero();
         matB0.fill(-1);
-        matX0.setZero();
 
-        if (pointSearchSqDis[4] < 1.0) {
-            for (int j = 0; j < 5; j++) {
-                matA0(j, 0) = laserCloudSurfFromMapDS->points[pointSearchInd[j]].x;
-                matA0(j, 1) = laserCloudSurfFromMapDS->points[pointSearchInd[j]].y;
-                matA0(j, 2) = laserCloudSurfFromMapDS->points[pointSearchInd[j]].z;
+        // 메모리 접근 패턴 최적화: 연속적 접근
+        for (int j = 0; j < 5; j++) {
+            const auto& searchPoint = laserCloudSurfFromMapDS->points[pointSearchInd[j]];
+            matA0(j, 0) = searchPoint.x;
+            matA0(j, 1) = searchPoint.y;
+            matA0(j, 2) = searchPoint.z;
+        }
+
+        // QR 분해로 선형 방정식 풀기
+        matX0 = matA0.colPivHouseholderQr().solve(matB0);
+
+        // 평면 방정식 계수 정규화
+        float pa = matX0(0, 0);
+        float pb = matX0(1, 0);
+        float pc = matX0(2, 0);
+        float pd = 1;
+
+        // ps 역수 미리 계산하여 나눗셈 최소화
+        float ps_inv = 1.0f / sqrt(pa * pa + pb * pb + pc * pc);
+        pa *= ps_inv; 
+        pb *= ps_inv; 
+        pc *= ps_inv; 
+        pd *= ps_inv;
+
+        // 평면 검증 최적화: 빠른 실패 패턴
+        bool planeValid = true;
+        for (int j = 0; j < 5; j++) {
+            const auto& searchPoint = laserCloudSurfFromMapDS->points[pointSearchInd[j]];
+            float dist = fabs(pa * searchPoint.x + pb * searchPoint.y + pc * searchPoint.z + pd);
+            if (dist > 0.2) {
+                planeValid = false;
+                break;
             }
+        }
 
-            matX0 = matA0.colPivHouseholderQr().solve(matB0);
+        if (planeValid) {
+            // 점과 평면 사이의 거리 계산
+            float pd2 = pa * pointSel.x + pb * pointSel.y + pc * pointSel.z + pd;
+            
+            // 제곱근 연산 최소화
+            float point_dist = sqrt(pointOri.x * pointOri.x + pointOri.y * pointOri.y + pointOri.z * pointOri.z);
+            float s = 1 - 0.9 * fabs(pd2) / point_dist;
 
-            float pa = matX0(0, 0);
-            float pb = matX0(1, 0);
-            float pc = matX0(2, 0);
-            float pd = 1;
-
-            float ps = sqrt(pa * pa + pb * pb + pc * pc);
-            pa /= ps; pb /= ps; pc /= ps; pd /= ps;
-
-            bool planeValid = true;
-            for (int j = 0; j < 5; j++) {
-                if (fabs(pa * laserCloudSurfFromMapDS->points[pointSearchInd[j]].x +
-                         pb * laserCloudSurfFromMapDS->points[pointSearchInd[j]].y +
-                         pc * laserCloudSurfFromMapDS->points[pointSearchInd[j]].z + pd) > 0.2) {
-                    planeValid = false;
-                    break;
-                }
-            }
-
-            if (planeValid) {
-                float pd2 = pa * pointSel.x + pb * pointSel.y + pc * pointSel.z + pd;
-
-                float s = 1 - 0.9 * fabs(pd2) / sqrt(sqrt(pointOri.x * pointOri.x
-                        + pointOri.y * pointOri.y + pointOri.z * pointOri.z));
-
+            // 최종 계수 계산 및 결과 저장
+            if (s > 0.1) {
                 coeff.x = s * pa;
                 coeff.y = s * pb;
                 coeff.z = s * pc;
                 coeff.intensity = s * pd2;
 
-                if (s > 0.1) {
-                    laserCloudOriSurfVec[i] = pointOri;
-                    coeffSelSurfVec[i] = coeff;
-                    laserCloudOriSurfFlag[i] = true;
-                }
+                laserCloudOriSurfVec[i] = pointOri;
+                coeffSelSurfVec[i] = coeff;
+                laserCloudOriSurfFlag[i] = true;
             }
         }
     }
