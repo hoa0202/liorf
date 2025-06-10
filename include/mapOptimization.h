@@ -1,41 +1,18 @@
 #pragma once
 
 #include "utility.h"
-#include "costmap.h" // 코스트맵 생성기 클래스 헤더 추가
-#include "loopclosure.h" // Loop Closure 클래스 헤더 추가
-#include "db_manager.h" // 데이터베이스 관리자 헤더 추가
+#include "costmap.h"
+#include "loopclosure.h"
+#include "db_manager.h"
+#include "PGOManager.h"
 #include "liorf/msg/cloud_info.hpp"
 #include "liorf/srv/save_map.hpp"
-// <!-- liorf_yjz_lucky_boy -->
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
-#include <gtsam/geometry/Rot3.h>
-#include <gtsam/geometry/Pose3.h>
-#include <gtsam/slam/PriorFactor.h>
-#include <gtsam/slam/BetweenFactor.h>
-#include <gtsam/navigation/GPSFactor.h>
-#include <gtsam/navigation/ImuFactor.h>
-#include <gtsam/navigation/CombinedImuFactor.h>
-#include <gtsam/nonlinear/NonlinearFactorGraph.h>
-#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
-#include <gtsam/nonlinear/Marginals.h>
-#include <gtsam/nonlinear/Values.h>
-#include <gtsam/inference/Symbol.h>
-
-#include <gtsam/nonlinear/ISAM2.h>
-
 #include <GeographicLib/Geocentric.hpp>
 #include <GeographicLib/LocalCartesian.hpp>
-
 #include "Scancontext.h"
 #include <nav_msgs/msg/occupancy_grid.hpp>
-#include <numeric> // for std::accumulate
-
-using namespace gtsam;
-
-using symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
-using symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
-using symbol_shorthand::B; // Bias  (ax,ay,az,gx,gy,gz)
-using symbol_shorthand::G; // GPS pose
+#include <numeric>
 
 enum class SCInputType 
 { 
@@ -46,16 +23,7 @@ enum class SCInputType
 
 class mapOptimization : public ParamServer
 {
-
 public:
-    // gtsam
-    NonlinearFactorGraph gtSAMgraph;
-    Values initialEstimate;
-    Values optimizedEstimate;
-    ISAM2 *isam;
-    Values isamCurrentEstimate;
-    Eigen::MatrixXd poseCovariance;
-
     rclcpp::Subscription<liorf::msg::CloudInfo>::SharedPtr subCloud;
     rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr subGPS;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr subLoop;
@@ -73,7 +41,7 @@ public:
 
     rclcpp::Service<liorf::srv::SaveMap>::SharedPtr srvSaveMap;
 
-    std::deque<nav_msgs::msg::Odometry> gpsQueue;
+    std::deque<sensor_msgs::msg::NavSatFix> gpsQueue;
     liorf::msg::CloudInfo cloudInfo;
 
     vector<pcl::PointCloud<PointType>::Ptr> surfCloudKeyFrames;
@@ -83,13 +51,13 @@ public:
     pcl::PointCloud<PointType>::Ptr copy_cloudKeyPoses3D;
     pcl::PointCloud<PointTypePose>::Ptr copy_cloudKeyPoses6D;
 
-    pcl::PointCloud<PointType>::Ptr laserCloudSurfLast; // surf feature set from odoOptimization
-    pcl::PointCloud<PointType>::Ptr laserCloudSurfLastDS; // downsampled surf feature set from odoOptimization
+    pcl::PointCloud<PointType>::Ptr laserCloudSurfLast;
+    pcl::PointCloud<PointType>::Ptr laserCloudSurfLastDS;
 
     pcl::PointCloud<PointType>::Ptr laserCloudOri;
     pcl::PointCloud<PointType>::Ptr coeffSel;
 
-    std::vector<PointType> laserCloudOriSurfVec; // surf point holder for parallel computation
+    std::vector<PointType> laserCloudOriSurfVec;
     std::vector<PointType> coeffSelSurfVec;
     std::vector<bool> laserCloudOriSurfFlag;
 
@@ -105,7 +73,7 @@ public:
     pcl::VoxelGrid<PointType> downSizeFilterSurf;
     pcl::VoxelGrid<PointType> downSizeFilterLocalMapSurf;
     pcl::VoxelGrid<PointType> downSizeFilterICP;
-    pcl::VoxelGrid<PointType> downSizeFilterSurroundingKeyPoses; // for surrounding key poses of scan-to-map optimization
+    pcl::VoxelGrid<PointType> downSizeFilterSurroundingKeyPoses;
     
     rclcpp::Time timeLaserInfoStamp;
     double timeLaserInfoCur;
@@ -131,29 +99,30 @@ public:
 
     GeographicLib::LocalCartesian gps_trans_;
 
-    // scancontext loop closure는 LoopClosure 클래스에서 관리
-    // SCManager scManager;
-
     std::unique_ptr<tf2_ros::TransformBroadcaster> br;
 
-    // TF Buffer와 Listener
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
-    // 코스트맵 관련 변수
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_pub_;
-    std::unique_ptr<CostmapGenerator> costmap_generator_; // 코스트맵 생성기
+    std::unique_ptr<CostmapGenerator> costmap_generator_;
 
-    // Loop Closure 관련 변수
-    std::unique_ptr<LoopClosure> loop_closure_; // 루프 클로저 모듈
+    std::unique_ptr<LoopClosure> loop_closure_;
 
-    // 데이터베이스 관련 변수
-    std::unique_ptr<DBManager> db_manager_; // 데이터베이스 관리자
-    bool use_database_mode_; // 데이터베이스 모드 활성화 여부
-    bool localization_mode_; // 로컬라이제이션 모드 여부
-    int active_keyframes_window_size_; // 메모리에 유지할 키프레임 수
-    int active_loop_features_window_size_; // 메모리에 유지할 루프 특징점 수
-    double spatial_query_radius_; // 공간 쿼리 반경
+    std::unique_ptr<DBManager> db_manager_;
+    bool use_database_mode_;
+    bool localization_mode_;
+    int active_keyframes_window_size_;
+    int active_loop_features_window_size_;
+    double spatial_query_radius_;
+
+    std::unique_ptr<PGOManager> pgo_manager_;
+
+    // GPS 관련 변수
+    bool initGPS = false;
+    double gpsAltitudeInit = 0;
+    bool useGpsElevation = false;
+    float gpsCovThreshold = 2.0;
 
     mapOptimization(const rclcpp::NodeOptions & options);
 
@@ -195,7 +164,6 @@ public:
     void updateMapSize(const pcl::PointCloud<PointType>::Ptr& cloud);
     void clearOldFrames();
 
-    // 데이터베이스 관련 함수
     void initializeDBManager();
     void loadKeyFramesFromDB();
     void updateActiveWindow(const PointTypePose& current_pose);

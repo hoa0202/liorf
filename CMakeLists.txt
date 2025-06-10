@@ -44,7 +44,7 @@ find_package(tf2_eigen REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(PCL REQUIRED)
-find_package(pcl_ros REQUIRED)  # 추가된 부분
+find_package(pcl_ros REQUIRED)
 find_package(GTSAM REQUIRED)
 find_package(Eigen REQUIRED)
 find_package(OpenMP REQUIRED)
@@ -54,7 +54,7 @@ find_package(Boost REQUIRED COMPONENTS timer)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 
-set(ros2_lib "rclcpp;rclpy;std_msgs;sensor_msgs;geometry_msgs;nav_msgs;cv_bridge;pcl_msgs;pcl_conversions;visualization_msgs;tf2;tf2_ros;tf2_eigen;tf2_sensor_msgs;tf2_geometry_msgs;pcl_ros")  # pcl_ros 추가
+set(ros2_lib "rclcpp;rclpy;std_msgs;sensor_msgs;geometry_msgs;nav_msgs;cv_bridge;pcl_msgs;pcl_conversions;visualization_msgs;tf2;tf2_ros;tf2_eigen;tf2_sensor_msgs;tf2_geometry_msgs;pcl_ros")
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "/usr/share/cmake/geographiclib/")
 find_package(GeographicLib REQUIRED)
@@ -100,39 +100,65 @@ file(GLOB common_lib "lib/*.cpp")
 ###########
 ## Build ##
 ###########
-# <!-- liorf_yjz_lucky_boy -->
 # Range Image Projection
 add_executable(${PROJECT_NAME}_imageProjection src/imageProjection.cpp ${common_lib})
 ament_target_dependencies(${PROJECT_NAME}_imageProjection ${ros2_lib})
 target_link_libraries(${PROJECT_NAME}_imageProjection "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
 
-# Mapping Optimization Library
-add_library(${PROJECT_NAME}_mapOptmization_lib SHARED
-  src/mapOptmization.cpp 
-  src/costmap.cpp 
-  src/loopclosure.cpp
-  src/db_manager.cpp
-  ${common_lib} 
-  include/Scancontext.cpp
+# PGOManager Library
+add_library(${PROJECT_NAME}_pgo_manager_lib SHARED
+  src/PGOManager.cpp
+  ${common_lib}
 )
-target_compile_options(${PROJECT_NAME}_mapOptmization_lib PRIVATE ${OpenMP_CXX_FLAGS})
+target_compile_options(${PROJECT_NAME}_pgo_manager_lib PRIVATE ${OpenMP_CXX_FLAGS})
 if(USE_PCH)
-  target_precompile_headers(${PROJECT_NAME}_mapOptmization_lib PRIVATE 
+  target_precompile_headers(${PROJECT_NAME}_pgo_manager_lib PRIVATE 
     <pcl/point_cloud.h>
     <pcl/point_types.h>
     <gtsam/geometry/Pose3.h>
     <Eigen/Dense>
   )
 endif()
-ament_target_dependencies(${PROJECT_NAME}_mapOptmization_lib ${ros2_lib})
-target_link_libraries(${PROJECT_NAME}_mapOptmization_lib Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam ${SQLITE3_LIBRARIES})
+ament_target_dependencies(${PROJECT_NAME}_pgo_manager_lib ${ros2_lib})
+target_link_libraries(${PROJECT_NAME}_pgo_manager_lib Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam ${SQLITE3_LIBRARIES})
+
+# Mapping Optimization Library
+add_library(${PROJECT_NAME}_mapOptimization_lib SHARED
+  src/mapOptimization.cpp 
+  src/costmap.cpp 
+  src/loopclosure.cpp
+  src/db_manager.cpp
+  ${common_lib} 
+  include/Scancontext.cpp
+)
+target_compile_options(${PROJECT_NAME}_mapOptimization_lib PRIVATE ${OpenMP_CXX_FLAGS})
+if(USE_PCH)
+  target_precompile_headers(${PROJECT_NAME}_mapOptimization_lib PRIVATE 
+    <pcl/point_cloud.h>
+    <pcl/point_types.h>
+    <gtsam/geometry/Pose3.h>
+    <Eigen/Dense>
+  )
+endif()
+ament_target_dependencies(${PROJECT_NAME}_mapOptimization_lib ${ros2_lib})
+target_link_libraries(${PROJECT_NAME}_mapOptimization_lib 
+  ${PROJECT_NAME}_pgo_manager_lib
+  Boost::timer 
+  "${cpp_typesupport_target}" 
+  ${PCL_LIBRARIES} 
+  ${OpenCV_LIBRARIES} 
+  ${OpenMP_CXX_FLAGS} 
+  ${GeographicLib_LIBRARIES} 
+  gtsam 
+  ${SQLITE3_LIBRARIES}
+)
 
 # Mapping Optimization Executable
-add_executable(${PROJECT_NAME}_mapOptmization src/main.cpp)
-target_link_libraries(${PROJECT_NAME}_mapOptmization ${PROJECT_NAME}_mapOptmization_lib)
-ament_target_dependencies(${PROJECT_NAME}_mapOptmization ${ros2_lib})
+add_executable(${PROJECT_NAME}_mapOptimization src/main.cpp)
+target_link_libraries(${PROJECT_NAME}_mapOptimization ${PROJECT_NAME}_mapOptimization_lib)
+ament_target_dependencies(${PROJECT_NAME}_mapOptimization ${ros2_lib})
 
-# # IMU Preintegration
+# IMU Preintegration
 add_executable(${PROJECT_NAME}_imuPreintegration src/imuPreintegration.cpp ${common_lib})
 ament_target_dependencies(${PROJECT_NAME}_imuPreintegration ${ros2_lib})
 target_link_libraries(${PROJECT_NAME}_imuPreintegration Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} gtsam)
@@ -155,11 +181,10 @@ target_link_libraries(grid_map_generator
 install(TARGETS grid_map_generator
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 
-
 # Removert Node: 동적 물체 제거용 노드
 add_executable(removert_node
   src/removert_node.cpp
-  include/tsdf_grid.cpp    # 실제 경로로 수정
+  include/tsdf_grid.cpp
 )
 ament_target_dependencies(removert_node
   rclcpp
@@ -184,13 +209,14 @@ install(
   TARGETS 
   ${PROJECT_NAME}_imageProjection
   ${PROJECT_NAME}_imuPreintegration
-  ${PROJECT_NAME}_mapOptmization
+  ${PROJECT_NAME}_mapOptimization
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
   TARGETS
-  ${PROJECT_NAME}_mapOptmization_lib
+  ${PROJECT_NAME}_mapOptimization_lib
+  ${PROJECT_NAME}_pgo_manager_lib
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib
   RUNTIME DESTINATION bin
@@ -203,12 +229,6 @@ install(
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # uncomment the line when a copyright and license is not present in all source files
-  #set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # uncomment the line when this package is not in a git repo
-  #set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
 

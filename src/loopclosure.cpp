@@ -644,131 +644,62 @@ bool LoopClosure::detectLoopClosureExternal(int *latestID, int *closestID)
 
 void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKeyframes, const int& key, const int& searchNum, const int& loop_index)
 {
-    // 대상 클라우드 초기화
     nearKeyframes->clear();
     
-    // 검색 할 키프레임 ID 및 개수 설정
-    int cloudSize = cloudKeyPoses6D->size();
-    
-    // loop_index가 -1이면 자체 검색, 그렇지 않으면 외부 검출된 루프 인덱스 사용
-    int start_idx = key;
-    int search_count = searchNum;
-    
-    // 루프 인덱스 유효성 검사
-    if (loop_index >= 0 && loop_index < cloudSize) {
-        // 해당 루프 인덱스를 사용하여 검색 시작점 설정
-        start_idx = loop_index;
-        // 자기 자신(1개)만 사용
-        search_count = 1;
-    }
-    
     // 키프레임 ID 유효성 검사
-    if (key < 0 || key >= cloudSize) {
-        RCLCPP_ERROR(node_->get_logger(), "유효하지 않은 키프레임 ID: %d (총 포즈 수: %d)", key, cloudSize);
+    if (key < 0 || key >= cloudKeyPoses6D->size()) {
+        RCLCPP_ERROR(node_->get_logger(), "유효하지 않은 키프레임 ID: %d (총 포즈 수: %d)", key, cloudKeyPoses6D->size());
         return;
     }
     
-    // 타겟 키프레임 설정
-    PointTypePose targetPose = cloudKeyPoses6D->points[start_idx];
-    
-    // DB 모드인 경우와 아닌 경우에 따라 다르게 처리
+    // DB 모드인 경우
     if (use_db_mode_ && db_manager_ && db_manager_->isInitialized()) {
-        // DB 모드: 데이터베이스에서 키프레임 로드
-        
-        // 자기 자신인 경우: 직접 로드
-        if (search_count == 0 || search_count == 1) {
-            pcl::PointCloud<PointType>::Ptr cloud;
-            
-            // 루프 클로저 특징점으로 먼저 시도
-            cloud = loadLoopFeatureFromDB(start_idx);
-            
-            // 없으면 일반 키프레임 로드 시도
-            if (!cloud || cloud->empty()) {
-                cloud = db_manager_->loadCloud(start_idx);
-            }
-            
-            if (cloud && !cloud->empty()) {
-                *nearKeyframes += *cloud;
-            } else {
-                RCLCPP_ERROR(node_->get_logger(), "키프레임 ID %d: DB에서 로드 실패", start_idx);
-            }
-            
+        // 현재 키프레임 로드
+        auto cloud = db_manager_->loadCloud(key);
+        if (cloud && !cloud->empty()) {
+            *nearKeyframes += *cloud;
+        } else {
+            RCLCPP_ERROR(node_->get_logger(), "키프레임 ID %d: DB에서 로드 실패", key);
             return;
         }
         
-        // 검색 범위 내 키프레임 추가
-        std::vector<int> keyframe_ids;
-        
-        // 반경 내 키프레임 ID 로드
-        if (loop_index < 0) {
-            // 반경 기반 검색
-            keyframe_ids = db_manager_->loadKeyFramesByRadius(targetPose, historyKeyframeSearchRadius, search_count);
-        } else {
-            // 시간 차이 기반 검색
-            // 데이터베이스 검색 쿼리 생성 (복잡하므로 간단하게 구현)
-            int startID = std::max(0, start_idx - search_count / 2);
-            int endID = std::min(cloudSize - 1, start_idx + search_count / 2);
+        // 주변 키프레임 로드
+        if (searchNum > 0) {
+            PointTypePose currentPose = cloudKeyPoses6D->points[key];
+            auto nearby_ids = db_manager_->loadKeyFramesByRadius(currentPose, historyKeyframeSearchRadius, searchNum);
             
-            for (int i = startID; i <= endID; i++) {
-                keyframe_ids.push_back(i);
-            }
-        }
-        
-        // 각 키프레임 로드 및 합치기
-        for (int id : keyframe_ids) {
-            if (id == start_idx) continue; // 시작점은 이미 추가했으므로 스킵
-            
-            pcl::PointCloud<PointType>::Ptr cloud;
-            
-            // 루프 클로저 특징점으로 먼저 시도
-            cloud = loadLoopFeatureFromDB(id);
-            
-            // 없으면 일반 키프레임 로드 시도
-            if (!cloud || cloud->empty()) {
-                cloud = db_manager_->loadCloud(id);
-            }
-            
-            if (cloud && !cloud->empty()) {
-                *nearKeyframes += *cloud;
+            for (int id : nearby_ids) {
+                if (id == key) continue;
+                
+                auto nearby_cloud = db_manager_->loadCloud(id);
+                if (nearby_cloud && !nearby_cloud->empty()) {
+                    *nearKeyframes += *nearby_cloud;
+                }
             }
         }
     } else {
-        // 메모리 모드: 메모리에 있는 키프레임 사용
-        
-        // 벡터 유효성 검사
-        if (surfCloudKeyFrames.empty()) {
-            RCLCPP_ERROR(node_->get_logger(), "빈 서페이스 클라우드 키프레임 벡터");
-            return;
+        // 메모리 모드
+        if (key < surfCloudKeyFrames.size() && surfCloudKeyFrames[key]) {
+            *nearKeyframes += *surfCloudKeyFrames[key];
         }
         
-        // 자기 자신인 경우: 해당 키프레임만 사용
-        if (search_count == 0 || search_count == 1) {
-            if (start_idx < static_cast<int>(surfCloudKeyFrames.size()) && surfCloudKeyFrames[start_idx]) {
-                *nearKeyframes += *surfCloudKeyFrames[start_idx];
-            } else {
-                RCLCPP_ERROR(node_->get_logger(), "키프레임 ID %d: 메모리에서 로드 실패", start_idx);
-            }
-            return;
-        }
-        
-        // 검색 범위 내 키프레임 추가
-        for (int i = -search_count / 2; i <= search_count / 2; ++i) {
-            int keyNear = start_idx + i;
-            if (keyNear < 0 || keyNear >= cloudSize)
-                continue;
-                
-            if (keyNear < static_cast<int>(surfCloudKeyFrames.size()) && surfCloudKeyFrames[keyNear]) {
-                *nearKeyframes += *surfCloudKeyFrames[keyNear];
+        if (searchNum > 0) {
+            for (int i = -searchNum/2; i <= searchNum/2; ++i) {
+                int keyNear = key + i;
+                if (keyNear < 0 || keyNear >= surfCloudKeyFrames.size()) continue;
+                if (surfCloudKeyFrames[keyNear]) {
+                    *nearKeyframes += *surfCloudKeyFrames[keyNear];
+                }
             }
         }
     }
     
     // 다운샘플링
-    if (nearKeyframes->points.size() > 1000) {
-        pcl::PointCloud<PointType>::Ptr cloud_temp(new pcl::PointCloud<PointType>());
-        downSizeFilterICP.setInputCloud(nearKeyframes);
-        downSizeFilterICP.filter(*cloud_temp);
-        *nearKeyframes = *cloud_temp;
+    if (nearKeyframes->size() > 0) {
+        pcl::VoxelGrid<PointType> downSizeFilter;
+        downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+        downSizeFilter.setInputCloud(nearKeyframes);
+        downSizeFilter.filter(*nearKeyframes);
     }
 }
 

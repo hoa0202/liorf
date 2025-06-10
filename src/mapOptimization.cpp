@@ -1,188 +1,170 @@
 #include "utility.h"
 #include "liorf/msg/cloud_info.hpp"
 #include "liorf/srv/save_map.hpp"
-// <!-- liorf_yjz_lucky_boy -->
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
-#include <gtsam/geometry/Rot3.h>
-#include <gtsam/geometry/Pose3.h>
-#include <gtsam/slam/PriorFactor.h>
-#include <gtsam/slam/BetweenFactor.h>
-#include <gtsam/navigation/GPSFactor.h>
-#include <gtsam/navigation/ImuFactor.h>
-#include <gtsam/navigation/CombinedImuFactor.h>
-#include <gtsam/nonlinear/NonlinearFactorGraph.h>
-#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
-#include <gtsam/nonlinear/Marginals.h>
-#include <gtsam/nonlinear/Values.h>
-#include <gtsam/inference/Symbol.h>
-
-#include <gtsam/nonlinear/ISAM2.h>
-
 #include <GeographicLib/Geocentric.hpp>
 #include <GeographicLib/LocalCartesian.hpp>
-
 #include "Scancontext.h"
 #include <nav_msgs/msg/occupancy_grid.hpp>
-#include <numeric> // for std::accumulate
-#include "costmap.h" // 코스트맵 생성기 클래스 헤더 추가
-#include "loopclosure.h" // Loop Closure 클래스 헤더 추가
-
+#include <numeric>
+#include "costmap.h"
+#include "loopclosure.h"
 #include "mapOptimization.h"
 
 mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamServer("liorf_mapOptimization", options)
-    {
-        ISAM2Params parameters;
-        parameters.relinearizeThreshold = 0.1;
-        parameters.relinearizeSkip = 1;
-        isam = new ISAM2(parameters);
+{
+    // PGOManager 초기화
+    pgo_manager_ = std::make_unique<PGOManager>(this->shared_from_this());
 
-        subCloud = create_subscription<liorf::msg::CloudInfo>("liorf/deskew/cloud_info", QosPolicy(history_policy, reliability_policy),
-                    std::bind(&mapOptimization::laserCloudInfoHandler, this, std::placeholders::_1));
-        subGPS = create_subscription<sensor_msgs::msg::NavSatFix>(gpsTopic, QosPolicy(history_policy, reliability_policy),
-                    std::bind(&mapOptimization::gpsHandler, this, std::placeholders::_1));
+    subCloud = create_subscription<liorf::msg::CloudInfo>("liorf/deskew/cloud_info", QosPolicy(history_policy, reliability_policy),
+                std::bind(&mapOptimization::laserCloudInfoHandler, this, std::placeholders::_1));
+    subGPS = create_subscription<sensor_msgs::msg::NavSatFix>(gpsTopic, QosPolicy(history_policy, reliability_policy),
+                std::bind(&mapOptimization::gpsHandler, this, std::placeholders::_1));
 
-        pubKeyPoses = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/mapping/trajectory", QosPolicy(history_policy, reliability_policy));
-        pubLaserCloudSurround = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/mapping/map_global", QosPolicy(history_policy, reliability_policy));
-        pubLaserOdometryGlobal = create_publisher<nav_msgs::msg::Odometry>("liorf/mapping/odometry", QosPolicy(history_policy, reliability_policy));
-        pubLaserOdometryIncremental = create_publisher<nav_msgs::msg::Odometry>("liorf/mapping/odometry_incremental", QosPolicy(history_policy, reliability_policy));
-        pubPath = create_publisher<nav_msgs::msg::Path>("liorf/mapping/path", QosPolicy(history_policy, reliability_policy));
-        pubRecentKeyFrames = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/mapping/map_local", QosPolicy(history_policy, reliability_policy));
-        pubRecentKeyFrame = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/mapping/cloud_registered", QosPolicy(history_policy, reliability_policy));
-        pubCloudRegisteredRaw = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/mapping/cloud_registered_raw", QosPolicy(history_policy, reliability_policy));
-        pubSLAMInfo = create_publisher<liorf::msg::CloudInfo>("liorf/mapping/slam_info", QosPolicy(history_policy, reliability_policy));
-        pubGpsOdom = create_publisher<nav_msgs::msg::Odometry>("liorf/mapping/gps_odom", QosPolicy(history_policy, reliability_policy));
+    pubKeyPoses = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/mapping/trajectory", QosPolicy(history_policy, reliability_policy));
+    pubLaserCloudSurround = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/mapping/map_global", QosPolicy(history_policy, reliability_policy));
+    pubLaserOdometryGlobal = create_publisher<nav_msgs::msg::Odometry>("liorf/mapping/odometry", QosPolicy(history_policy, reliability_policy));
+    pubLaserOdometryIncremental = create_publisher<nav_msgs::msg::Odometry>("liorf/mapping/odometry_incremental", QosPolicy(history_policy, reliability_policy));
+    pubPath = create_publisher<nav_msgs::msg::Path>("liorf/mapping/path", QosPolicy(history_policy, reliability_policy));
+    pubRecentKeyFrames = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/mapping/map_local", QosPolicy(history_policy, reliability_policy));
+    pubRecentKeyFrame = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/mapping/cloud_registered", QosPolicy(history_policy, reliability_policy));
+    pubCloudRegisteredRaw = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/mapping/cloud_registered_raw", QosPolicy(history_policy, reliability_policy));
+    pubSLAMInfo = create_publisher<liorf::msg::CloudInfo>("liorf/mapping/slam_info", QosPolicy(history_policy, reliability_policy));
+    pubGpsOdom = create_publisher<nav_msgs::msg::Odometry>("liorf/mapping/gps_odom", QosPolicy(history_policy, reliability_policy));
 
-        srvSaveMap = create_service<liorf::srv::SaveMap>("liorf/save_map", 
-                        std::bind(&mapOptimization::saveMapService, this, std::placeholders::_1, std::placeholders::_2 ));
+    srvSaveMap = create_service<liorf::srv::SaveMap>("liorf/save_map", 
+                    std::bind(&mapOptimization::saveMapService, this, std::placeholders::_1, std::placeholders::_2 ));
 
-        downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
-        downSizeFilterLocalMapSurf.setLeafSize(surroundingKeyframeMapLeafSize, surroundingKeyframeMapLeafSize, surroundingKeyframeMapLeafSize);
-        downSizeFilterICP.setLeafSize(loopClosureICPSurfLeafSize, loopClosureICPSurfLeafSize, loopClosureICPSurfLeafSize);
-        downSizeFilterSurroundingKeyPoses.setLeafSize(surroundingKeyframeDensity, surroundingKeyframeDensity, surroundingKeyframeDensity); // for surrounding key poses of scan-to-map optimization
+    downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
+    downSizeFilterLocalMapSurf.setLeafSize(surroundingKeyframeMapLeafSize, surroundingKeyframeMapLeafSize, surroundingKeyframeMapLeafSize);
+    downSizeFilterICP.setLeafSize(loopClosureICPSurfLeafSize, loopClosureICPSurfLeafSize, loopClosureICPSurfLeafSize);
+    downSizeFilterSurroundingKeyPoses.setLeafSize(surroundingKeyframeDensity, surroundingKeyframeDensity, surroundingKeyframeDensity);
 
-        br = std::make_unique<tf2_ros::TransformBroadcaster>(this);
+    br = std::make_unique<tf2_ros::TransformBroadcaster>(this);
 
-        tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
-        tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-        allocateMemory();
+    allocateMemory();
+    
+    // 코스트맵 발행자 생성
+    costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/liorf/costmap", 10);
+    
+    // 코스트맵 생성기 초기화
+    costmap_generator_ = std::make_unique<CostmapGenerator>(this);
+    
+    // 파라미터 설정
+    double costmap_resolution = this->declare_parameter<double>("costmap_resolution", 0.1);
+    double costmap_width = this->declare_parameter<double>("costmap_width", 20.0);
+    double costmap_height = this->declare_parameter<double>("costmap_height", 20.0);
+    double min_height_threshold = this->declare_parameter<double>("min_height_threshold", 0.15);
+    double max_height_threshold = this->declare_parameter<double>("max_height_threshold", 1.1);
+    int obstacle_threshold = this->declare_parameter<int>("obstacle_threshold", 2);
+    int point_threshold = this->declare_parameter<int>("point_threshold", 1);
+    double height_diff_threshold = this->declare_parameter<double>("height_diff_threshold", 0.01);
+    std::string base_frame_id = this->declare_parameter<std::string>("base_frame_id", "base_link");
+    bool auto_resize_map = this->declare_parameter<bool>("auto_resize_map", true);
+    
+    costmap_generator_->setParameters(
+        costmap_resolution, costmap_width, costmap_height,
+        min_height_threshold, max_height_threshold,
+        obstacle_threshold, point_threshold, height_diff_threshold,
+        base_frame_id, auto_resize_map
+    );
+    
+    RCLCPP_INFO(this->get_logger(), "Costmap integration initialized with resolution: %.2f, size: %.1fm x %.1fm, origin: (%.2f, %.2f)",
+               costmap_resolution, costmap_width, costmap_height, -costmap_width/2, -costmap_height/2);
+
+    // 데이터베이스 관련 기능 초기화
+    use_database_mode_ = this->declare_parameter<bool>("use_database_mode", false);
+    localization_mode_ = this->declare_parameter<bool>("localization_mode", false);
+    active_keyframes_window_size_ = this->declare_parameter<int>("active_keyframes_window_size", 100);
+    active_loop_features_window_size_ = this->declare_parameter<int>("active_loop_features_window_size", 100);
+    spatial_query_radius_ = this->declare_parameter<double>("spatial_query_radius", 10.0);
+    
+    if (use_database_mode_) {
+        RCLCPP_INFO(this->get_logger(), "데이터베이스 모드 활성화: %s", 
+                   localization_mode_ ? "로컬라이제이션 모드" : "매핑 모드");
         
-        // 코스트맵 발행자 생성
-        costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/liorf/costmap", 10);
-        
-        // 코스트맵 생성기 초기화
-        costmap_generator_ = std::make_unique<CostmapGenerator>(this);
-        
-        // 파라미터 설정
-        double costmap_resolution = this->declare_parameter<double>("costmap_resolution", 0.1);
-        double costmap_width = this->declare_parameter<double>("costmap_width", 20.0);     // 너비 축소
-        double costmap_height = this->declare_parameter<double>("costmap_height", 20.0);   // 높이 축소
-        double min_height_threshold = this->declare_parameter<double>("min_height_threshold", 0.15);
-        double max_height_threshold = this->declare_parameter<double>("max_height_threshold", 1.1);
-        int obstacle_threshold = this->declare_parameter<int>("obstacle_threshold", 2);
-        int point_threshold = this->declare_parameter<int>("point_threshold", 1);
-        double height_diff_threshold = this->declare_parameter<double>("height_diff_threshold", 0.01);
-        std::string base_frame_id = this->declare_parameter<std::string>("base_frame_id", "base_link");
-        bool auto_resize_map = this->declare_parameter<bool>("auto_resize_map", true);
-        
-        // 코스트맵 생성기에 파라미터 전달
-        costmap_generator_->setParameters(
-            costmap_resolution, costmap_width, costmap_height,
-            min_height_threshold, max_height_threshold,
-            obstacle_threshold, point_threshold, height_diff_threshold,
-            base_frame_id, auto_resize_map
-        );
-        
-        RCLCPP_INFO(this->get_logger(), "Costmap integration initialized with resolution: %.2f, size: %.1fm x %.1fm, origin: (%.2f, %.2f)",
-                   costmap_resolution, costmap_width, costmap_height, -costmap_width/2, -costmap_height/2);
-
-        // 데이터베이스 관련 기능 초기화
-        use_database_mode_ = this->declare_parameter<bool>("use_database_mode", false);
-        localization_mode_ = this->declare_parameter<bool>("localization_mode", false);  // 로컬라이제이션 모드 파라미터 추가
-        active_keyframes_window_size_ = this->declare_parameter<int>("active_keyframes_window_size", 100);
-        active_loop_features_window_size_ = this->declare_parameter<int>("active_loop_features_window_size", 100);
-        spatial_query_radius_ = this->declare_parameter<double>("spatial_query_radius", 10.0);
-        
-        if (use_database_mode_) {
-            RCLCPP_INFO(this->get_logger(), "데이터베이스 모드 활성화: %s", 
-                       localization_mode_ ? "로컬라이제이션 모드" : "매핑 모드");
+        try {
+            std::string db_path = this->declare_parameter<std::string>("database_path", "");
+            std::string clouds_directory = this->declare_parameter<std::string>("clouds_directory", "");
+            bool database_reset_on_start = this->declare_parameter<bool>("database_reset_on_start", true);
             
-            try {
-                // 데이터베이스 경로 및 설정 가져오기
-                std::string db_path = this->declare_parameter<std::string>("database_path", "");
-                std::string clouds_directory = this->declare_parameter<std::string>("clouds_directory", "");
-                bool database_reset_on_start = this->declare_parameter<bool>("database_reset_on_start", true);
-                
-                // 절대 경로 변환
-                if (!db_path.empty() && db_path[0] != '/') {
-                    if (db_path.find("~/") == 0) {
-                        db_path = std::string(std::getenv("HOME")) + db_path.substr(1);
-                    } else {
-                        char cwd[1024];
-                        if (getcwd(cwd, sizeof(cwd)) != NULL) {
-                            db_path = std::string(cwd) + "/" + db_path;
-                        }
-                    }
-                }
-                
-                if (!clouds_directory.empty() && clouds_directory[0] != '/') {
-                    if (clouds_directory.find("~/") == 0) {
-                        clouds_directory = std::string(std::getenv("HOME")) + clouds_directory.substr(1);
-                    } else {
-                        char cwd[1024];
-                        if (getcwd(cwd, sizeof(cwd)) != NULL) {
-                            clouds_directory = std::string(cwd) + "/" + clouds_directory;
-                        }
-                    }
-                }
-                
-                RCLCPP_INFO(this->get_logger(), "최종 데이터베이스 경로: %s", db_path.c_str());
-                RCLCPP_INFO(this->get_logger(), "최종 클라우드 디렉토리: %s", clouds_directory.c_str());
-                RCLCPP_INFO(this->get_logger(), "데이터베이스 초기화 모드: %s", database_reset_on_start ? "완전 초기화" : "연속 매핑");
-                RCLCPP_INFO(this->get_logger(), "메모리 키프레임 제한: %d, 메모리 루프 특징점 제한: %d", 
-                           active_keyframes_window_size_, active_loop_features_window_size_);
-                RCLCPP_INFO(this->get_logger(), "공간 쿼리 반경: %.2f", spatial_query_radius_);
-                RCLCPP_INFO(this->get_logger(), "로컬라이제이션 모드: %s", localization_mode_ ? "활성화" : "비활성화");
-                
-                db_manager_ = std::make_unique<DBManager>(
-                    this,
-                    db_path,
-                    active_keyframes_window_size_,
-                    spatial_query_radius_,
-                    clouds_directory,
-                    database_reset_on_start,
-                    localization_mode_  // 로컬라이제이션 모드 전달
-                );
-                
-                // 루프 특징점 메모리 제한 설정
-                if (db_manager_) {
-                    db_manager_->setMaxMemoryLoopFeatures(active_loop_features_window_size_);
-                }
-                
-                if (!db_manager_->initialize()) {
-                    RCLCPP_ERROR(this->get_logger(), "데이터베이스 초기화 실패, 데이터베이스 모드 비활성화");
-                    db_manager_.reset();
-                    use_database_mode_ = false;
+            if (!db_path.empty() && db_path[0] != '/') {
+                if (db_path.find("~/") == 0) {
+                    db_path = std::string(std::getenv("HOME")) + db_path.substr(1);
                 } else {
-                    RCLCPP_INFO(this->get_logger(), "데이터베이스 관리자 초기화 성공");
-                    db_manager_->startMemoryMonitoring();
+                    char cwd[1024];
+                    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+                        db_path = std::string(cwd) + "/" + db_path;
+                    }
                 }
-            } catch (const std::exception& e) {
-                RCLCPP_ERROR(this->get_logger(), "데이터베이스 초기화 중 예외 발생: %s", e.what());
+            }
+            
+            if (!clouds_directory.empty() && clouds_directory[0] != '/') {
+                if (clouds_directory.find("~/") == 0) {
+                    clouds_directory = std::string(std::getenv("HOME")) + clouds_directory.substr(1);
+                } else {
+                    char cwd[1024];
+                    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+                        clouds_directory = std::string(cwd) + "/" + clouds_directory;
+                    }
+                }
+            }
+            
+            RCLCPP_INFO(this->get_logger(), "최종 데이터베이스 경로: %s", db_path.c_str());
+            RCLCPP_INFO(this->get_logger(), "최종 클라우드 디렉토리: %s", clouds_directory.c_str());
+            RCLCPP_INFO(this->get_logger(), "데이터베이스 초기화 모드: %s", database_reset_on_start ? "완전 초기화" : "연속 매핑");
+            RCLCPP_INFO(this->get_logger(), "메모리 키프레임 제한: %d, 메모리 루프 특징점 제한: %d", 
+                       active_keyframes_window_size_, active_loop_features_window_size_);
+            RCLCPP_INFO(this->get_logger(), "공간 쿼리 반경: %.2f", spatial_query_radius_);
+            RCLCPP_INFO(this->get_logger(), "로컬라이제이션 모드: %s", localization_mode_ ? "활성화" : "비활성화");
+            
+            db_manager_ = std::make_unique<DBManager>(
+                this,
+                db_path,
+                active_keyframes_window_size_,
+                spatial_query_radius_,
+                clouds_directory,
+                database_reset_on_start,
+                localization_mode_
+            );
+            
+            if (db_manager_) {
+                db_manager_->setMaxMemoryLoopFeatures(active_loop_features_window_size_);
+                // PGO 매니저에 DB 매니저 설정
+                pgo_manager_->setDBManager(db_manager_.get());
+                
+                // DB에서 키프레임 로드
+                if (!localization_mode_) {
+                    pgo_manager_->loadKeyframesFromDB();
+                }
+            }
+            
+            if (!db_manager_->initialize()) {
+                RCLCPP_ERROR(this->get_logger(), "데이터베이스 초기화 실패, 데이터베이스 모드 비활성화");
                 db_manager_.reset();
                 use_database_mode_ = false;
+            } else {
+                RCLCPP_INFO(this->get_logger(), "데이터베이스 관리자 초기화 성공");
+                db_manager_->startMemoryMonitoring();
             }
-        } else {
-            RCLCPP_INFO(this->get_logger(), "메모리 기반 모드로 실행 중 (데이터베이스 비활성화)");
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "데이터베이스 초기화 중 예외 발생: %s", e.what());
+            db_manager_.reset();
+            use_database_mode_ = false;
         }
+    } else {
+        RCLCPP_INFO(this->get_logger(), "메모리 기반 모드로 실행 중 (데이터베이스 비활성화)");
+    }
 
-    // Loop Closure 모듈 초기화 - 명시적으로 파라미터 전달
+    // Loop Closure 모듈 초기화
     double historyKeyframeSearchRadius = 10.0;
     int historyKeyframeSearchNum = 25;
     double historyKeyframeSearchTimeDiff = 30.0;
     double historyKeyframeFitnessScore = 0.3;
     
-    // ParamServer에서 이미 선언된 파라미터를 가져옵니다
     this->get_parameter_or("historyKeyframeSearchRadius", historyKeyframeSearchRadius, historyKeyframeSearchRadius);
     this->get_parameter_or("historyKeyframeSearchNum", historyKeyframeSearchNum, historyKeyframeSearchNum);
     this->get_parameter_or("historyKeyframeSearchTimeDiff", historyKeyframeSearchTimeDiff, historyKeyframeSearchTimeDiff);
@@ -191,17 +173,15 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
     RCLCPP_INFO(this->get_logger(), "Initializing Loop Closure with parameters: radius=%f, num=%d, timeDiff=%f, fitnessScore=%f",
         historyKeyframeSearchRadius, historyKeyframeSearchNum, historyKeyframeSearchTimeDiff, historyKeyframeFitnessScore);
     
-    // 루프 클로저 초기화 - DB 관리자 전달
     loop_closure_ = std::make_unique<LoopClosure>(
         this,
         historyKeyframeSearchRadius,
         historyKeyframeSearchNum,
         historyKeyframeSearchTimeDiff,
         historyKeyframeFitnessScore,
-        use_database_mode_ ? db_manager_.get() : nullptr  // DB 관리자 전달
+        use_database_mode_ ? db_manager_.get() : nullptr
     );
     
-    // DB 모드 설정
     if (loop_closure_) {
         loop_closure_->setDBMode(use_database_mode_);
         RCLCPP_INFO(this->get_logger(), "Loop Closure 모듈 DB 모드: %s", use_database_mode_ ? "활성화" : "비활성화");
@@ -308,33 +288,9 @@ void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedP
 }
 
 void mapOptimization::gpsHandler(const sensor_msgs::msg::NavSatFix::SharedPtr gpsMsg)
-    {
-        if (gpsMsg->status.status != 0)
-            return;
-
-        Eigen::Vector3d trans_local_;
-        static bool first_gps = false;
-        if (!first_gps) {
-            first_gps = true;
-            gps_trans_.Reset(gpsMsg->latitude, gpsMsg->longitude, gpsMsg->altitude);
-        }
-
-        gps_trans_.Forward(gpsMsg->latitude, gpsMsg->longitude, gpsMsg->altitude, trans_local_[0], trans_local_[1], trans_local_[2]);
-
-        nav_msgs::msg::Odometry gps_odom;
-        gps_odom.header = gpsMsg->header;
-        gps_odom.header.frame_id = "map";
-        gps_odom.pose.pose.position.x = trans_local_[0]; //gps odom _ publish 방향 
-        gps_odom.pose.pose.position.y = trans_local_[1];
-        gps_odom.pose.pose.position.z = trans_local_[2];
-        tf2::Quaternion quat_tf;
-        quat_tf.setRPY(0.0, 0.0, 0.0);
-        geometry_msgs::msg::Quaternion quat_msg;
-        tf2::convert(quat_tf, quat_msg);
-        gps_odom.pose.pose.orientation = quat_msg;
-        pubGpsOdom->publish(gps_odom);
-        gpsQueue.push_back(gps_odom);
-    }
+{
+    gpsQueue.push_back(*gpsMsg);
+}
 
 void mapOptimization::pointAssociateToMap(PointType const * const pi, PointType * const po)
     {
@@ -721,100 +677,93 @@ bool mapOptimization::saveFrame()
     }
 
 void mapOptimization::addOdomFactor()
+{
+    if (cloudKeyPoses3D->points.empty()) // 최초 프레임
     {
-        if (cloudKeyPoses3D->points.empty())
-        {
-            noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((gtsam::Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
-            gtSAMgraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
-            initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
-        }else{
-            noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
-            gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
-            gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
-            gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
-            initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
-        }
+        // PGOManager를 통해 최초 노드 추가 및 Prior Factor 설정
+        gtsam::Pose3 initialPose = trans2gtsamPose(transformTobeMapped);
+        int currentKeyframeIdx = pgo_manager_->addKeyframeNode(initialPose);
+
+        noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances(
+            (gtsam::Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()
+        );
+        pgo_manager_->addPriorFactor(currentKeyframeIdx, initialPose, priorNoise);
+    } else {
+        // 이전 키프레임 포즈와 현재 추정 포즈
+        gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
+        gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
+
+        // PGOManager를 통해 현재 키프레임 노드 추가
+        int prevKeyframeIdx = pgo_manager_->getNumPoses() - 1;
+        int currentKeyframeIdx = pgo_manager_->addKeyframeNode(poseTo);
+
+        noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances(
+            (gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished()
+        );
+
+        // PGOManager를 통해 Odometry Factor 추가
+        pgo_manager_->addOdometryFactor(prevKeyframeIdx, currentKeyframeIdx, poseFrom.between(poseTo), odometryNoise);
     }
+}
 
 void mapOptimization::addGPSFactor()
-    {
-        if (gpsQueue.empty())
-            return;
+{
+    if (gpsQueue.empty())
+        return;
 
-        // wait for system initialized and settles down
-        if (cloudKeyPoses3D->points.empty())
-            return;
+    // GPS 데이터가 너무 오래된 경우 제거
+    while (!gpsQueue.empty())
+    {
+        if (gpsQueue.front().header.stamp.sec < timeLaserInfoCur - 0.2)
+            gpsQueue.pop_front();
+        else if (gpsQueue.front().header.stamp.sec > timeLaserInfoCur + 0.2)
+            break;
         else
         {
-            if (common_lib_->pointDistance(cloudKeyPoses3D->front(), cloudKeyPoses3D->back()) < 5.0)
-                return;
-        }
+            sensor_msgs::msg::NavSatFix thisGPS = gpsQueue.front();
+            gpsQueue.pop_front();
 
-        // pose covariance small, no need to correct
-        if (poseCovariance(3,3) < poseCovThreshold && poseCovariance(4,4) < poseCovThreshold)
-            return;
+            float noise_x = thisGPS.position_covariance[0];
+            float noise_y = thisGPS.position_covariance[4];
+            float noise_z = thisGPS.position_covariance[8];
+            if (noise_x > gpsCovThreshold || noise_y > gpsCovThreshold)
+                continue;
 
-        // last gps position
-        static PointType lastGPSPoint;
-
-        while (!gpsQueue.empty())
-        {
-            if (ROS_TIME(gpsQueue.front().header.stamp) < timeLaserInfoCur - 0.2)
+            float gps_x = thisGPS.longitude;
+            float gps_y = thisGPS.latitude;
+            float gps_z = thisGPS.altitude;
+            if (!useGpsElevation)
             {
-                // message too old
-                gpsQueue.pop_front();
+                gps_z = 0;
+                noise_z = 0.01;
             }
-            else if (ROS_TIME(gpsQueue.front().header.stamp) > timeLaserInfoCur + 0.2)
+
+            // GPS 데이터를 로컬 좌표계로 변환
+            if (!initGPS)
             {
-                // message too new
-                break;
+                gps_trans_.Reset(gps_y, gps_x, gps_z);
+                initGPS = true;
+                gpsAltitudeInit = gps_z;
             }
-            else
-            {
-                nav_msgs::msg::Odometry thisGPS = gpsQueue.front();
-                gpsQueue.pop_front();
 
-                // GPS too noisy, skip
-                float noise_x = thisGPS.pose.covariance[0];
-                float noise_y = thisGPS.pose.covariance[7];
-                float noise_z = thisGPS.pose.covariance[14];
-                if (noise_x > gpsCovThreshold || noise_y > gpsCovThreshold)
-                    continue;
+            double gps_x_local, gps_y_local, gps_z_local;
+            gps_trans_.Forward(gps_y, gps_x, gps_z, gps_x_local, gps_y_local, gps_z_local);
+            gps_z_local = gps_z_local - gpsAltitudeInit;
 
-                float gps_x = thisGPS.pose.pose.position.x;
-                float gps_y = thisGPS.pose.pose.position.y;
-                float gps_z = thisGPS.pose.pose.position.z;
-                if (!useGpsElevation)
-                {
-                    gps_z = transformTobeMapped[5];
-                    noise_z = 0.01;
-                }
+            // GPS 노이즈 모델 생성
+            gtsam::Vector Vector3(3);
+            Vector3 << max(noise_x, 1.0f), max(noise_y, 1.0f), max(noise_z, 1.0f);
+            noiseModel::Diagonal::shared_ptr gps_noise = noiseModel::Diagonal::Variances(Vector3);
 
-                // GPS not properly initialized (0,0,0)
-                if (abs(gps_x) < 1e-6 && abs(gps_y) < 1e-6)
-                    continue;
+            // PGOManager를 통해 GPS Factor 추가
+            int currentKeyframeIdx = pgo_manager_->getNumPoses() - 1;
+            pgo_manager_->addGPSFactor(currentKeyframeIdx, gtsam::Point3(gps_x, gps_y, gps_z), gps_noise);
 
-                // Add GPS every a few meters
-                PointType curGPSPoint;
-                curGPSPoint.x = gps_x;
-                curGPSPoint.y = gps_y;
-                curGPSPoint.z = gps_z;
-                if (common_lib_->pointDistance(curGPSPoint, lastGPSPoint) < 5.0)
-                    continue;
-                else
-                    lastGPSPoint = curGPSPoint;
-
-                gtsam::Vector Vector3(3);
-                Vector3 << max(noise_x, 1.0f), max(noise_y, 1.0f), max(noise_z, 1.0f);
-                noiseModel::Diagonal::shared_ptr gps_noise = noiseModel::Diagonal::Variances(Vector3);
-                gtsam::GPSFactor gps_factor(cloudKeyPoses3D->size(), gtsam::Point3(gps_x, gps_y, gps_z), gps_noise);
-                gtSAMgraph.add(gps_factor);
-
-                aLoopIsClosed = true;
-                break;
-            }
+            aLoopIsClosed = true;
+            break;
         }
     }
+}
 
 void mapOptimization::addLoopFactor()
 {
@@ -825,187 +774,94 @@ void mapOptimization::addLoopFactor()
     const auto& loopPoseQueue = loop_closure_->getLoopPoseQueue();
     const auto& loopNoiseQueue = loop_closure_->getLoopNoiseQueue();
     
-    // 루프 큐가 비어있으면 반환
     if (loopIndexQueue.empty())
         return;
 
-    // 그래프에 루프 제약 추가
     for (int i = 0; i < (int)loopIndexQueue.size(); ++i)
     {
         int indexFrom = loopIndexQueue[i].first;
         int indexTo = loopIndexQueue[i].second;
         gtsam::Pose3 poseBetween = loopPoseQueue[i];
         auto noiseBetween = loopNoiseQueue[i];
-        gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
+
+        // PGOManager를 통해 Loop Factor 추가
+        pgo_manager_->addLoopFactor(indexFrom, indexTo, poseBetween, noiseBetween);
     }
 
-    // Loop Closure 완료 후 플래그 설정
     aLoopIsClosed = true;
 }
 
 void mapOptimization::saveKeyFramesAndFactor()
+{
+    if (saveFrame() == false)
+        return;
+
+    // 1. Odom 팩터 추가 (포즈 정보가 cloudKeyPoses6D에 추가됨)
+    addOdomFactor();
+
+    // 2. GPS 팩터 추가 (해당하는 경우)
+    addGPSFactor();
+
+    // 3. 루프 클로저 팩터 추가 (해당하는 경우)
+    addLoopFactor();
+
+    // 4. 새로운 키프레임의 포인트 클라우드 저장
+    //    이 부분이 핵심적인 수정 사항입니다.
+    pcl::PointCloud<PointType>::Ptr thisKeyFrame(new pcl::PointCloud<PointType>());
+    pcl::copyPointCloud(*laserCloudSurfLastDS, *thisKeyFrame);
+
+    if (use_database_mode_ && db_manager_)
     {
-        if (saveFrame() == false)
-            return;
-
-        // odom factor
-        addOdomFactor();
-
-        // gps factor
-        addGPSFactor();
-
-        // loop factor
-        addLoopFactor();
-
-        // cout << "****************************************************" << endl;
-        // gtSAMgraph.print("GTSAM Graph:\n");
-
-        // update iSAM
-        isam->update(gtSAMgraph, initialEstimate);
-        isam->update();
-
-        if (aLoopIsClosed == true)
-        {
-            isam->update();
-            isam->update();
-            isam->update();
-            isam->update();
-            isam->update();
-        }
-
-        gtSAMgraph.resize(0);
-        initialEstimate.clear();
-
-        //save key poses
-        PointType thisPose3D;
-        PointTypePose thisPose6D;
-        Pose3 latestEstimate;
-
-        isamCurrentEstimate = isam->calculateEstimate();
-        latestEstimate = isamCurrentEstimate.at<Pose3>(isamCurrentEstimate.size()-1);
-        // cout << "****************************************************" << endl;
-        // isamCurrentEstimate.print("Current estimate: ");
-
-        thisPose3D.x = latestEstimate.translation().x();
-        thisPose3D.y = latestEstimate.translation().y();
-        thisPose3D.z = latestEstimate.translation().z();
-        thisPose3D.intensity = cloudKeyPoses3D->size(); // this can be used as index
-        cloudKeyPoses3D->push_back(thisPose3D);
-
-        thisPose6D.x = thisPose3D.x;
-        thisPose6D.y = thisPose3D.y;
-        thisPose6D.z = thisPose3D.z;
-        thisPose6D.intensity = thisPose3D.intensity ; // this can be used as index
-        thisPose6D.roll  = latestEstimate.rotation().roll();
-        thisPose6D.pitch = latestEstimate.rotation().pitch();
-        thisPose6D.yaw   = latestEstimate.rotation().yaw();
-        thisPose6D.time = timeLaserInfoCur;
-        cloudKeyPoses6D->push_back(thisPose6D);
-
-        // cout << "****************************************************" << endl;
-        // cout << "Pose covariance:" << endl;
-        // cout << isam->marginalCovariance(isamCurrentEstimate.size()-1) << endl << endl;
-        poseCovariance = isam->marginalCovariance(isamCurrentEstimate.size()-1);
-
-        // save updated transform
-        transformTobeMapped[0] = latestEstimate.rotation().roll();
-        transformTobeMapped[1] = latestEstimate.rotation().pitch();
-        transformTobeMapped[2] = latestEstimate.rotation().yaw();
-        transformTobeMapped[3] = latestEstimate.translation().x();
-        transformTobeMapped[4] = latestEstimate.translation().y();
-        transformTobeMapped[5] = latestEstimate.translation().z();
-
-        // save all the received edge and surf points
-        pcl::PointCloud<PointType>::Ptr thisSurfKeyFrame(new pcl::PointCloud<PointType>());
-        pcl::copyPointCloud(*laserCloudSurfLastDS,    *thisSurfKeyFrame);
-
-        // save key frame cloud
-        surfCloudKeyFrames.push_back(thisSurfKeyFrame);
-        
-        // 데이터베이스에 키프레임 및 포즈 저장
-        if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
-            int keyframe_id = cloudKeyPoses3D->size() - 1;
-            PointTypePose pose = cloudKeyPoses6D->points[keyframe_id];
-            
-            // 현재 프레임의 포인트 클라우드
-            pcl::PointCloud<PointType>::Ptr thisKeyFrame(new pcl::PointCloud<PointType>());
-            pcl::copyPointCloud(*laserCloudSurfLastDS, *thisKeyFrame);
-            
-            // 데이터베이스에 저장
-            if (!db_manager_->addKeyFrame(keyframe_id, timeLaserInfoCur, pose, thisKeyFrame)) {
-                RCLCPP_ERROR(this->get_logger(), "키프레임 ID %d를 데이터베이스에 저장하지 못했습니다", keyframe_id);
-            } else {
-                RCLCPP_DEBUG(this->get_logger(), "키프레임 ID %d가 데이터베이스에 저장되었습니다", keyframe_id);
-            }
-            
-            // 메모리 관리: 키프레임 수가 지정된 한계를 초과하면 오래된 프레임 정리
-            if (static_cast<int>(surfCloudKeyFrames.size()) > active_keyframes_window_size_) {
-                clearOldFrames();
-            }
-            
-            // 활성 윈도우 업데이트
-            updateActiveWindow(thisPose6D);
-        }
-
-        // The following code is copy from sc-lio-sam
-        // Scan Context loop detector - giseop
-        // - SINGLE_SCAN_FULL: using downsampled original point cloud (/full_cloud_projected + downsampling)
-        // - SINGLE_SCAN_FEAT: using surface feature as an input point cloud for scan context (2020.04.01: checked it works.)
-        // - MULTI_SCAN_FEAT: using NearKeyframes (because a MulRan scan does not have beyond region, so to solve this issue ... )
-        
-        // Loop Closure 모듈에 데이터 전달 - SC Manager 관련 작업도 Loop Closure 내부에서 처리
-        if (loop_closure_) {
-            if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
-                // DB 모드 - 포즈 정보만 전달
-                pcl::PointCloud<PointType>::Ptr thisRawCloudKeyFrame(new pcl::PointCloud<PointType>());
-                pcl::fromROSMsg(cloudInfo.cloud_deskewed, *thisRawCloudKeyFrame);
-                loop_closure_->setInputDataWithDB(cloudKeyPoses3D, cloudKeyPoses6D, timeLaserInfoCur, thisRawCloudKeyFrame);
-                RCLCPP_DEBUG(this->get_logger(), "Loop closure using DB mode");
-            } else {
-                // 기존 메모리 모드
-                pcl::PointCloud<PointType>::Ptr thisRawCloudKeyFrame(new pcl::PointCloud<PointType>());
-                pcl::fromROSMsg(cloudInfo.cloud_deskewed, *thisRawCloudKeyFrame);
-                loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur, thisRawCloudKeyFrame);
-                RCLCPP_DEBUG(this->get_logger(), "Loop closure using memory-only mode");
-            }
-        }
-
-        // save path for visualization
-        updatePath(thisPose6D);
+        // DB 모드: 클라우드를 DB에 저장하고, 인메모리 벡터에는 추가하지 않음
+        // 이렇게 함으로써 surfCloudKeyFrames 벡터가 무한정 커지는 것을 방지합니다.
+        int newKeyframeId = cloudKeyPoses6D->size() - 1;
+        RCLCPP_DEBUG(get_logger(), "DB Mode: Saving keyframe %d to database.", newKeyframeId);
+        db_manager_->addKeyFrame(newKeyframeId, timeLaserInfoCur, cloudKeyPoses6D->points.back(), thisKeyFrame);
     }
+    else
+    {
+        // 메모리 모드: 기존 방식대로 벡터에 저장
+        surfCloudKeyFrames.push_back(thisKeyFrame);
+    }
+
+    // 5. 그래프 최적화 수행
+    if (pgo_manager_->optimizeGraph()) {
+        // 최적화 성공 시 DB에 저장
+        if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
+            pgo_manager_->saveOptimizedPosesToDB();
+        }
+    }
+
+    // 6. 최적화된 포즈로 현재 포즈들 업데이트
+    correctPoses();
+
+    // 7. 오도메트리 및 프레임 발행
+    publishOdometry();
+    publishFrames();
+}
 
 void mapOptimization::correctPoses()
+{
+    if (aLoopIsClosed == true)
     {
-        if (cloudKeyPoses3D->points.empty())
-            return;
-
-        if (aLoopIsClosed == true)
+        // 최적화된 포즈로 업데이트
+        for (int pgo_idx = 0; pgo_idx < (int)cloudKeyPoses6D->size(); pgo_idx++)
         {
-            // clear map cache
-            laserCloudMapContainer.clear();
-            // clear path
-            globalPath.poses.clear();
-            // update key poses
-            int numPoses = isamCurrentEstimate.size();
-            for (int i = 0; i < numPoses; ++i)
-            {
-                cloudKeyPoses3D->points[i].x = isamCurrentEstimate.at<Pose3>(i).translation().x();
-                cloudKeyPoses3D->points[i].y = isamCurrentEstimate.at<Pose3>(i).translation().y();
-                cloudKeyPoses3D->points[i].z = isamCurrentEstimate.at<Pose3>(i).translation().z();
-
-                cloudKeyPoses6D->points[i].x = cloudKeyPoses3D->points[i].x;
-                cloudKeyPoses6D->points[i].y = cloudKeyPoses3D->points[i].y;
-                cloudKeyPoses6D->points[i].z = cloudKeyPoses3D->points[i].z;
-                cloudKeyPoses6D->points[i].roll  = isamCurrentEstimate.at<Pose3>(i).rotation().roll();
-                cloudKeyPoses6D->points[i].pitch = isamCurrentEstimate.at<Pose3>(i).rotation().pitch();
-                cloudKeyPoses6D->points[i].yaw   = isamCurrentEstimate.at<Pose3>(i).rotation().yaw();
-
-                updatePath(cloudKeyPoses6D->points[i]);
+            int db_id = pgo_manager_->getDbIdFromPGOIdx(pgo_idx);
+            gtsam::Pose3 optimizedPose = pgo_manager_->getOptimizedPose(db_id);
+            if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
+                optimizedPose = pgo_manager_->getPoseFromCache(db_id);
             }
-
-            aLoopIsClosed = false;
+            cloudKeyPoses6D->points[pgo_idx].x = optimizedPose.translation().x();
+            cloudKeyPoses6D->points[pgo_idx].y = optimizedPose.translation().y();
+            cloudKeyPoses6D->points[pgo_idx].z = optimizedPose.translation().z();
+            cloudKeyPoses6D->points[pgo_idx].roll = optimizedPose.rotation().roll();
+            cloudKeyPoses6D->points[pgo_idx].pitch = optimizedPose.rotation().pitch();
+            cloudKeyPoses6D->points[pgo_idx].yaw = optimizedPose.rotation().yaw();
         }
+        aLoopIsClosed = false;
     }
+}
 
 void mapOptimization::updatePath(const PointTypePose& pose_in)
     {
@@ -1423,18 +1279,23 @@ void mapOptimization::extractNearby()
 
 void mapOptimization::extractCloud(pcl::PointCloud<PointType>::Ptr cloudToExtract)
 {
-    // fuse the map
-    laserCloudSurfFromMap->clear(); 
+    laserCloudSurfFromMap->clear();
     for (int i = 0; i < (int)cloudToExtract->size(); ++i)
     {
         if (common_lib_->pointDistance(cloudToExtract->points[i], cloudKeyPoses3D->back()) > surroundingKeyframeSearchRadius)
             continue;
 
         int thisKeyInd = (int)cloudToExtract->points[i].intensity;
-        if (laserCloudMapContainer.find(thisKeyInd) != laserCloudMapContainer.end()) 
-        {
-            // transformed cloud available
-            *laserCloudSurfFromMap   += laserCloudMapContainer[thisKeyInd].second;
+
+        // DB 모드일 경우 DB에서 클라우드를 로드
+        if (use_database_mode_ && db_manager_) {
+            // 캐시 확인은 loadCloud 내에서 처리됨
+            auto cloud = db_manager_->loadCloud(thisKeyInd);
+            if (cloud) {
+                // cloud를 월드 좌표계로 변환해야 함
+                PointTypePose pose = cloudKeyPoses6D->points[thisKeyInd];
+                *laserCloudSurfFromMap += *transformPointCloud(cloud, &pose);
+            }
         } else {
             // transformed cloud not available
             pcl::PointCloud<PointType> laserCloudCornerTemp;
@@ -1460,18 +1321,15 @@ void mapOptimization::extractSurroundingKeyFrames()
     if (cloudKeyPoses3D->points.empty())
         return;
     
-    // 주변 키프레임 추출 결과를 저장할 변수들 초기화
-    if (laserCloudSurfFromMap) laserCloudSurfFromMap->clear();
-    
-    // 추출 방식 변경: extractNearby 함수 내용으로 복원
+    // 주변 키프레임 검색 로직은 기존과 동일
     pcl::PointCloud<PointType>::Ptr surroundingKeyPoses(new pcl::PointCloud<PointType>());
     pcl::PointCloud<PointType>::Ptr surroundingKeyPosesDS(new pcl::PointCloud<PointType>());
     std::vector<int> pointSearchInd;
     std::vector<float> pointSearchSqDis;
 
-    // extract all the nearby key poses and downsample them
-    kdtreeSurroundingKeyPoses->setInputCloud(cloudKeyPoses3D); // create kd-tree
+    kdtreeSurroundingKeyPoses->setInputCloud(cloudKeyPoses3D);
     kdtreeSurroundingKeyPoses->radiusSearch(cloudKeyPoses3D->back(), (double)surroundingKeyframeSearchRadius, pointSearchInd, pointSearchSqDis);
+    
     for (int i = 0; i < (int)pointSearchInd.size(); ++i)
     {
         int id = pointSearchInd[i];
@@ -1480,13 +1338,13 @@ void mapOptimization::extractSurroundingKeyFrames()
 
     downSizeFilterSurroundingKeyPoses.setInputCloud(surroundingKeyPoses);
     downSizeFilterSurroundingKeyPoses.filter(*surroundingKeyPosesDS);
+    
     for(auto& pt : surroundingKeyPosesDS->points)
     {
         kdtreeSurroundingKeyPoses->nearestKSearch(pt, 1, pointSearchInd, pointSearchSqDis);
         pt.intensity = cloudKeyPoses3D->points[pointSearchInd[0]].intensity;
     }
 
-    // also extract some latest key frames in case the robot rotates in one position
     int numPoses = cloudKeyPoses3D->size();
     for (int i = numPoses-1; i >= 0; --i)
     {
@@ -1496,32 +1354,54 @@ void mapOptimization::extractSurroundingKeyFrames()
             break;
     }
 
-    // 이후 extractCloud 함수 내용과 유사하게 변환
-    laserCloudSurfFromMap->clear(); 
+    // ================== 로컬 맵 생성 로직 (리팩토링된 부분) ==================
+    laserCloudSurfFromMap->clear();
     for (int i = 0; i < (int)surroundingKeyPosesDS->size(); ++i)
     {
         int thisKeyInd = (int)surroundingKeyPosesDS->points[i].intensity;
-        if (laserCloudMapContainer.find(thisKeyInd) != laserCloudMapContainer.end()) 
+
+        // DB 모드와 메모리 모드를 분리하여 로컬 맵 생성
+        if (use_database_mode_ && db_manager_)
         {
-            // transformed cloud available
-            *laserCloudSurfFromMap += laserCloudMapContainer[thisKeyInd].second;
-        } 
-        else 
+            // DB 모드: DB Manager를 통해 필요한 포인트 클라우드만 로드
+            // DBManager의 내부 캐시가 중복 I/O를 효율적으로 방지합니다.
+            auto cloud_from_db = db_manager_->loadCloud(thisKeyInd);
+            if (cloud_from_db && !cloud_from_db->empty())
+            {
+                // 월드 좌표계로 변환하여 로컬 맵에 추가
+                *laserCloudSurfFromMap += *transformPointCloud(cloud_from_db, &cloudKeyPoses6D->points[thisKeyInd]);
+            }
+        }
+        else
         {
-            // transformed cloud not available
-            pcl::PointCloud<PointType> laserCloudCornerTemp;
-            pcl::PointCloud<PointType> laserCloudSurfTemp = *transformPointCloud(surfCloudKeyFrames[thisKeyInd], &cloudKeyPoses6D->points[thisKeyInd]);
-            *laserCloudSurfFromMap += laserCloudSurfTemp;
-            laserCloudMapContainer[thisKeyInd] = make_pair(laserCloudCornerTemp, laserCloudSurfTemp);
+            // 메모리 모드: 기존 방식대로 laserCloudMapContainer와 surfCloudKeyFrames 사용
+            if (laserCloudMapContainer.find(thisKeyInd) != laserCloudMapContainer.end()) 
+            {
+                *laserCloudSurfFromMap += laserCloudMapContainer[thisKeyInd].second;
+            } 
+            else 
+            {
+                if (thisKeyInd < surfCloudKeyFrames.size()) {
+                    // 컨테이너에 없으면 surfCloudKeyFrames에서 가져와 변환 후 추가
+                    pcl::PointCloud<PointType> laserCloudSurfTemp = *transformPointCloud(surfCloudKeyFrames[thisKeyInd], &cloudKeyPoses6D->points[thisKeyInd]);
+                    *laserCloudSurfFromMap += laserCloudSurfTemp;
+                    // 다음 사용을 위해 컨테이너에 캐싱
+                    laserCloudMapContainer[thisKeyInd] = make_pair(pcl::PointCloud<PointType>(), laserCloudSurfTemp);
+                }
+            }
         }
     }
+    // =======================================================================
 
-    // 다운샘플링으로 포인트 클라우드 크기 줄이기
+    // 생성된 로컬 맵 다운샘플링
     downSizeFilterLocalMapSurf.setInputCloud(laserCloudSurfFromMap);
     downSizeFilterLocalMapSurf.filter(*laserCloudSurfFromMapDS);
     laserCloudSurfFromMapDSNum = laserCloudSurfFromMapDS->size();
-}
 
+    // 메모리 모드일 때만 맵 컨테이너 캐시 관리
+    if (!use_database_mode_ && laserCloudMapContainer.size() > 1000)
+        laserCloudMapContainer.clear();
+}
 void mapOptimization::downsampleCurrentScan()
 {
     laserCloudSurfLastDS->clear();
