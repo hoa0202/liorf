@@ -107,30 +107,30 @@ ament_target_dependencies(${PROJECT_NAME}_imageProjection ${ros2_lib})
 target_link_libraries(${PROJECT_NAME}_imageProjection "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
 
 # Mapping Optimization Library
-add_library(${PROJECT_NAME}_mapOptmization_lib SHARED
-  src/mapOptmization.cpp 
+add_library(${PROJECT_NAME}_mapOptimization_lib SHARED
+  src/mapOptimization.cpp 
   src/costmap.cpp 
   src/loopclosure.cpp
   src/db_manager.cpp
   ${common_lib} 
   include/Scancontext.cpp
 )
-target_compile_options(${PROJECT_NAME}_mapOptmization_lib PRIVATE ${OpenMP_CXX_FLAGS})
+target_compile_options(${PROJECT_NAME}_mapOptimization_lib PRIVATE ${OpenMP_CXX_FLAGS})
 if(USE_PCH)
-  target_precompile_headers(${PROJECT_NAME}_mapOptmization_lib PRIVATE 
+  target_precompile_headers(${PROJECT_NAME}_mapOptimization_lib PRIVATE 
     <pcl/point_cloud.h>
     <pcl/point_types.h>
     <gtsam/geometry/Pose3.h>
     <Eigen/Dense>
   )
 endif()
-ament_target_dependencies(${PROJECT_NAME}_mapOptmization_lib ${ros2_lib})
-target_link_libraries(${PROJECT_NAME}_mapOptmization_lib Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam ${SQLITE3_LIBRARIES})
+ament_target_dependencies(${PROJECT_NAME}_mapOptimization_lib ${ros2_lib})
+target_link_libraries(${PROJECT_NAME}_mapOptimization_lib Boost::timer "${cpp_typesupport_target}" ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} ${GeographicLib_LIBRARIES} gtsam ${SQLITE3_LIBRARIES})
 
 # Mapping Optimization Executable
-add_executable(${PROJECT_NAME}_mapOptmization src/main.cpp)
-target_link_libraries(${PROJECT_NAME}_mapOptmization ${PROJECT_NAME}_mapOptmization_lib)
-ament_target_dependencies(${PROJECT_NAME}_mapOptmization ${ros2_lib})
+add_executable(${PROJECT_NAME}_mapOptimization src/main.cpp)
+target_link_libraries(${PROJECT_NAME}_mapOptimization ${PROJECT_NAME}_mapOptimization_lib)
+ament_target_dependencies(${PROJECT_NAME}_mapOptimization ${ros2_lib})
 
 # # IMU Preintegration
 add_executable(${PROJECT_NAME}_imuPreintegration src/imuPreintegration.cpp ${common_lib})
@@ -184,13 +184,13 @@ install(
   TARGETS 
   ${PROJECT_NAME}_imageProjection
   ${PROJECT_NAME}_imuPreintegration
-  ${PROJECT_NAME}_mapOptmization
+  ${PROJECT_NAME}_mapOptimization
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
   TARGETS
-  ${PROJECT_NAME}_mapOptmization_lib
+  ${PROJECT_NAME}_mapOptimization_lib
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib
   RUNTIME DESTINATION bin

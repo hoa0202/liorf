@@ -113,8 +113,8 @@ def generate_launch_description():
         # ),
         Node(
             package='liorf',
-            executable='liorf_mapOptmization',
-            name='liorf_mapOptmization',
+            executable='liorf_mapOptimization',
+            name='liorf_mapOptimization',
             parameters=[parameter_file, {
                'costmap_resolution': 0.1,        # 격자 해상도 (m)
                'costmap_width': 1.0, # 수정금지 1.0 고정           # 초기 맵 폭 (m)
