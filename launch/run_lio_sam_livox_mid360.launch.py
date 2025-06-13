@@ -127,8 +127,8 @@ def generate_launch_description():
                'base_frame_id': 'base_link',     # 베이스 프레임 ID
                'auto_resize_map': True,          # 맵 자동 크기 조정 활성화
                'use_database_mode': True,
-               'database_path': '/root/dblio_ws/src/liorf/maps/slam_map.db', # 경로 수정금지 /root/liorf_ws2/src/liorf/maps/slam_map.db 고정
-               'clouds_directory': '/root/dblio_ws/src/liorf/maps/clouds', # 경로 수정금지 /root/liorf_ws2/src/liorf/maps/clouds 고정
+               'database_path': 'src/liorf/maps/slam_map.db', # 경로 수정금지 /root/liorf_ws2/src/liorf/maps/slam_map.db 고정
+               'clouds_directory': 'src/liorf/maps/clouds', # 경로 수정금지 /root/liorf_ws2/src/liorf/maps/clouds 고정
                'active_keyframes_window_size': 100,
                'active_loop_features_window_size' : 100,
                'spatial_query_radius': 10.0

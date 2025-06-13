@@ -565,6 +565,16 @@ std::vector<int> DBManager::loadKeyFramesByRadius(const PointTypePose& current_p
     }
     
     try {
+        // 최대 키프레임 수 검증
+        if (max_keyframes <= 0) {
+            max_keyframes = 50; // 기본값 설정
+            RCLCPP_WARN(node_->get_logger(), "유효하지 않은 최대 키프레임 수: %d, 기본값 %d 사용", 
+                      max_keyframes, 50);
+        }
+        
+        // 메모리 및 속도 최적화를 위한 ID 벡터 미리 할당
+        keyframe_ids.reserve(max_keyframes);
+        
         // 쿼리 생성 - X-Y 평면 기준으로만 검색 (Z축 무시)
         char sql[512];
         sprintf(sql, "SELECT id FROM keyframes_rtree WHERE "
@@ -587,31 +597,37 @@ std::vector<int> DBManager::loadKeyFramesByRadius(const PointTypePose& current_p
         // 결과 처리
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             int keyframe_id = sqlite3_column_int(stmt, 0);
+            if (keyframe_id >= 0) { // 유효한 ID만 추가
             keyframe_ids.push_back(keyframe_id);
+            }
         }
         
         sqlite3_finalize(stmt);
         
         // 순차적 데이터 정렬: 인덱스 기준으로 정렬하여 가까운 키프레임끼리 연속되게 함
         if (!keyframe_ids.empty()) {
-            // 원래 로직처럼 index 기준으로 정렬하여 연속적인 키프레임들이 함께 처리되도록 함
-            std::sort(keyframe_ids.begin(), keyframe_ids.end(), 
-                      [&current_pose, this](int a, int b) {
-                          // 현재 키프레임 ID와의 인덱스 차이를 계산
-                          return std::abs(a - static_cast<int>(current_pose.intensity)) < 
-                                 std::abs(b - static_cast<int>(current_pose.intensity));
-                      });
+            std::sort(keyframe_ids.begin(), keyframe_ids.end());
         }
         
-        RCLCPP_DEBUG(node_->get_logger(), "공간 쿼리: 반경 %.2f m 내에서 %zu개 키프레임 발견", 
-                   radius, keyframe_ids.size());
+        // 중복 ID 제거 (추가 안전 장치)
+        auto last = std::unique(keyframe_ids.begin(), keyframe_ids.end());
+        keyframe_ids.erase(last, keyframe_ids.end());
         
-        return keyframe_ids;
+        // 최대 크기 제한 (추가 안전 장치)
+        if (keyframe_ids.size() > static_cast<size_t>(max_keyframes)) {
+            keyframe_ids.resize(max_keyframes);
+        }
+        
+        RCLCPP_DEBUG(node_->get_logger(), "반경 %.2f m 내에서 %zu개의 키프레임 발견", radius, keyframe_ids.size());
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "키프레임 로드 중 예외 발생: %s", e.what());
+        keyframe_ids.clear(); // 오류 발생 시 빈 벡터 반환
+    } catch (...) {
+        RCLCPP_ERROR(node_->get_logger(), "키프레임 로드 중 알 수 없는 예외 발생");
+        keyframe_ids.clear();
     }
-    catch (const std::exception& e) {
-        RCLCPP_ERROR(node_->get_logger(), "키프레임 공간 쿼리 중 예외 발생: %s", e.what());
+    
         return keyframe_ids;
-    }
 }
 
 pcl::PointCloud<PointType>::Ptr DBManager::loadGlobalMap(float leaf_size) {
@@ -1631,3 +1647,127 @@ int DBManager::getNumLoopFeatures() const {
     sqlite3_finalize(stmt);
     return count;
 } 
+
+// loadPose 함수 구현 추가
+bool DBManager::loadPose(int keyframe_id, PointTypePose& pose) {
+    // ID 유효성 검사
+    if (keyframe_id < 0) {
+        RCLCPP_ERROR(node_->get_logger(), "유효하지 않은 키프레임 ID: %d", keyframe_id);
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!initialized_) {
+        RCLCPP_ERROR(node_->get_logger(), "데이터베이스가 초기화되지 않았습니다");
+        return false;
+    }
+    
+    try {
+        std::string sql = "SELECT x, y, z, roll, pitch, yaw, timestamp FROM keyframes WHERE id = ?;";
+        
+        sqlite3_stmt* stmt;
+        int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            RCLCPP_ERROR(node_->get_logger(), "SQL 준비 실패: %s", sqlite3_errmsg(db_));
+            return false;
+        }
+        
+        // 파라미터 바인딩
+        rc = sqlite3_bind_int(stmt, 1, keyframe_id);
+        if (rc != SQLITE_OK) {
+            RCLCPP_ERROR(node_->get_logger(), "SQL 바인딩 실패: %s", sqlite3_errmsg(db_));
+            sqlite3_finalize(stmt);
+            return false;
+        }
+        
+        bool success = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            // 데이터 타입 확인 - NULL 데이터 방지
+            if (sqlite3_column_type(stmt, 0) == SQLITE_NULL ||
+                sqlite3_column_type(stmt, 1) == SQLITE_NULL ||
+                sqlite3_column_type(stmt, 2) == SQLITE_NULL ||
+                sqlite3_column_type(stmt, 3) == SQLITE_NULL ||
+                sqlite3_column_type(stmt, 4) == SQLITE_NULL ||
+                sqlite3_column_type(stmt, 5) == SQLITE_NULL) {
+                RCLCPP_ERROR(node_->get_logger(), "ID %d의 포즈 데이터에 NULL 값 존재", keyframe_id);
+                sqlite3_finalize(stmt);
+                return false;
+            }
+            
+            // 데이터 추출
+            pose.x = sqlite3_column_double(stmt, 0);
+            pose.y = sqlite3_column_double(stmt, 1);
+            pose.z = sqlite3_column_double(stmt, 2);
+            pose.roll = sqlite3_column_double(stmt, 3);
+            pose.pitch = sqlite3_column_double(stmt, 4);
+            pose.yaw = sqlite3_column_double(stmt, 5);
+            
+            // timestamp는 NULL일 수 있으므로 별도 처리
+            if (sqlite3_column_type(stmt, 6) != SQLITE_NULL) {
+                pose.time = sqlite3_column_double(stmt, 6);
+            } else {
+                pose.time = 0.0; // 기본값 설정
+            }
+            
+            pose.intensity = keyframe_id;
+            success = true;
+            
+            // 비정상적인 포즈 값 확인 (예: NaN, Inf)
+            if (std::isnan(pose.x) || std::isnan(pose.y) || std::isnan(pose.z) ||
+                std::isnan(pose.roll) || std::isnan(pose.pitch) || std::isnan(pose.yaw) ||
+                std::isinf(pose.x) || std::isinf(pose.y) || std::isinf(pose.z) ||
+                std::isinf(pose.roll) || std::isinf(pose.pitch) || std::isinf(pose.yaw)) {
+                RCLCPP_ERROR(node_->get_logger(), "ID %d의 포즈에 비정상 값(NaN/Inf) 존재", keyframe_id);
+                success = false;
+            }
+        } else {
+            RCLCPP_ERROR(node_->get_logger(), "ID %d의 포즈를 찾을 수 없음", keyframe_id);
+        }
+        
+        sqlite3_finalize(stmt);
+        return success;
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "ID %d의 포즈 로드 중 예외 발생: %s", keyframe_id, e.what());
+        return false;
+    } catch (...) {
+        RCLCPP_ERROR(node_->get_logger(), "ID %d의 포즈 로드 중 알 수 없는 예외 발생", keyframe_id);
+        return false;
+    }
+}
+
+// 현재 캐시에 있는 키프레임 수 반환
+size_t DBManager::getKeyFrameCacheSize() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cloud_cache_.size();
+}
+
+// 데이터베이스의 총 키프레임 수 반환
+size_t DBManager::getTotalKeyFrameCount() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!initialized_) {
+        return 0;
+    }
+    
+    try {
+        std::string sql = "SELECT COUNT(*) FROM keyframes;";
+        sqlite3_stmt* stmt;
+        int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            RCLCPP_ERROR(node_->get_logger(), "SQL 준비 실패: %s", sqlite3_errmsg(db_));
+            return 0;
+        }
+        
+        size_t count = 0;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            count = static_cast<size_t>(sqlite3_column_int(stmt, 0));
+        }
+        
+        sqlite3_finalize(stmt);
+        return count;
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "키프레임 총 개수 조회 중 예외 발생: %s", e.what());
+        return 0;
+    }
+}

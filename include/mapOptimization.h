@@ -199,6 +199,7 @@ public:
     void initializeDBManager();
     void loadKeyFramesFromDB();
     void updateActiveWindow(const PointTypePose& current_pose);
+    void loadNearbyPosesFromDB(); // 주변 포즈 로드 함수 추가
 };
 
 int main(int argc, char** argv); 

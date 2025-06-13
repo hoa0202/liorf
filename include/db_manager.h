@@ -43,6 +43,7 @@ public:
                     pcl::PointCloud<PointType>::Ptr cloud);
     pcl::PointCloud<PointType>::Ptr loadCloud(int keyframe_id);
     bool deleteKeyFrame(int keyframe_id);
+    bool loadPose(int keyframe_id, PointTypePose& pose);
     
     // 루프 클로저 특징점 관련 함수
     bool addLoopFeature(int feature_id, double timestamp, const PointTypePose& pose,
@@ -87,6 +88,18 @@ public:
     // 로컬라이제이션 모드 설정/조회 함수
     void setLocalizationMode(bool mode) { localization_mode_ = mode; }
     bool getLocalizationMode() const { return localization_mode_; }
+    
+    /**
+     * @brief 현재 캐시에 있는 키프레임 수 반환
+     * @return 캐시된 키프레임 수
+     */
+    size_t getKeyFrameCacheSize();
+    
+    /**
+     * @brief 데이터베이스의 총 키프레임 수 반환
+     * @return 총 키프레임 수
+     */
+    size_t getTotalKeyFrameCount();
     
 private:
     // 데이터베이스 관련 변수

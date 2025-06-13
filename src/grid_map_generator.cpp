@@ -180,7 +180,7 @@ private:
 
       // 저장 위치 설정 (liorf_ws/src/liorf/GRID)
       std::string map_name = "saved_grid_map";
-      std::string dir = "/root/dblio_ws/src/liorf/GRID";
+      std::string dir = "src/liorf/GRID";
       fs::create_directories(dir);
       saveGridToPGMYAML(*grid, dir + "/" + map_name + ".pgm", dir + "/" + map_name + ".yaml");
     }  

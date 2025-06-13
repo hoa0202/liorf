@@ -1,6 +1,6 @@
 image: "saved_grid_map.pgm"
 resolution: 0.1
-origin: [-57.2827, -131.506, 0.0]
+origin: [-77.7159, -31.8756, 0.0]
 negate: 0
 occupied_thresh: 0.65
 free_thresh: 0.196
