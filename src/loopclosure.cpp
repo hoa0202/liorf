@@ -84,7 +84,7 @@ void LoopClosure::loopClosureThread()
         rate.sleep();
         
         performRSLoopClosure();
-        // performSCLoopClosure();
+        performSCLoopClosure();
         visualizeLoopClosure();
         
         // 임시 캐시 정리
