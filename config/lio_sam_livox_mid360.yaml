@@ -8,7 +8,7 @@
     pointCloudTopic: "/livox/lidar" #"points_raw"               # Point cloud data
     imuTopic: "/livox/imu" #"imu_raw"                         # IMU data
     odomTopic: "/odom" #"/liorf/mapping/odometry"                   # IMU pre-preintegration odometry, same frequency as IMU
-    gpsTopic: "/gps"                   # GPS odometry topic from navsat, see module_navsat.launch file
+    gpsTopic: "/gps/fix_main"                   # GPS odometry topic from navsat, see module_navsat.launch file
 
     # Frames
     lidarFrame: "livox_frame"
@@ -117,12 +117,19 @@
 
     # Database Settings
     use_database_mode: true                       # 데이터베이스 모드 활성화 여부 (true/false)
-    database_reset_on_start: true                 # 시작할 때 데이터베이스 초기화 여부 (true: 완전 초기화 모드, false: 연속 매핑 모드)
-    localization_mode: false                      # 로컬라이제이션 모드 여부 (true: 기존 맵 유지, false: 새 맵 생성)
+    database_reset_on_start: false                # 시작할 때 데이터베이스 초기화 여부 (true: 완전 초기화 모드, false: 연속 매핑 모드)
+    localization_mode: false                       # 로컬라이제이션 모드 여부 (true: 기존 맵 유지, false: 새 맵 생성)
     database_path: "/root/dblio_ws/src/liorf/maps/slam_map.db" # 경로 수정금지 데이터베이스 파일 경로
     clouds_directory: "/root/dblio_ws/src/liorf/maps/clouds"   # 경로 수정금지 포인트 클라우드 저장 디렉토리 경로
     active_keyframes_window_size: 5               # 메모리에 유지할 최대 키프레임 수 (100에서 5로 변경)
     spatial_query_radius: 50.0                    # 공간 쿼리 반경 (미터)
+
+    # Localization Settings
+    global_map_path: "/root/dblio_ws/src/liorf/PCD/GlobalMap.pcd"  # 전역 지도 파일 경로 (매핑 모드의 PCD 저장 경로와 일치)
+    global_map_leaf_size: 0.2                     # 전역 지도 다운샘플링 크기
+    surrounding_keyframe_search_radius: 50.0      # 현재 위치 기준 반경 (미터)
+    surrounding_keyframe_map_leaf_size: 0.2       # 지역 지도 다운샘플링 크기
+    localization_initial_pose_topic: "/initialpose" # 초기 위치 추정 토픽
 
     # Costmap Settings
     costmap_resolution: 0.1                       # 코스트맵 해상도 (미터)

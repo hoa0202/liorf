@@ -52,8 +52,21 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
         pubSLAMInfo = create_publisher<liorf::msg::CloudInfo>("liorf/mapping/slam_info", QosPolicy(history_policy, reliability_policy));
         pubGpsOdom = create_publisher<nav_msgs::msg::Odometry>("liorf/mapping/gps_odom", QosPolicy(history_policy, reliability_policy));
 
-        srvSaveMap = create_service<liorf::srv::SaveMap>("liorf/save_map", 
-                        std::bind(&mapOptimization::saveMapService, this, std::placeholders::_1, std::placeholders::_2 ));
+        // --- 모드 분기 로직 추가 ---
+        localization_mode_ = this->declare_parameter<bool>("localization_mode", false);
+
+        if (localization_mode_)
+        {
+            RCLCPP_INFO(this->get_logger(), "===== LOCALIZATION MODE ENABLED =====");
+            // Localization 모드에 필요한 초기화
+            initializeForLocalization();
+        }
+        else
+        {
+            RCLCPP_INFO(this->get_logger(), "===== SLAM (MAPPING) MODE ENABLED =====");
+            // SLAM(매핑) 모드에 필요한 초기화
+            initializeForSLAM();
+        }
 
         downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
         downSizeFilterLocalMapSurf.setLeafSize(surroundingKeyframeMapLeafSize, surroundingKeyframeMapLeafSize, surroundingKeyframeMapLeafSize);
@@ -98,7 +111,6 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
 
         // 데이터베이스 관련 기능 초기화
         use_database_mode_ = this->declare_parameter<bool>("use_database_mode", false);
-        localization_mode_ = this->declare_parameter<bool>("localization_mode", false);  // 로컬라이제이션 모드 파라미터 추가
         active_keyframes_window_size_ = this->declare_parameter<int>("active_keyframes_window_size", 100);
         active_loop_features_window_size_ = this->declare_parameter<int>("active_loop_features_window_size", 100);
         spatial_query_radius_ = this->declare_parameter<double>("spatial_query_radius", 10.0);
@@ -176,35 +188,37 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
             RCLCPP_INFO(this->get_logger(), "메모리 기반 모드로 실행 중 (데이터베이스 비활성화)");
         }
 
-    // Loop Closure 모듈 초기화 - 명시적으로 파라미터 전달
-    double historyKeyframeSearchRadius = 10.0;
-    int historyKeyframeSearchNum = 25;
-    double historyKeyframeSearchTimeDiff = 30.0;
-    double historyKeyframeFitnessScore = 0.3;
-    
-    // ParamServer에서 이미 선언된 파라미터를 가져옵니다
-    this->get_parameter_or("historyKeyframeSearchRadius", historyKeyframeSearchRadius, historyKeyframeSearchRadius);
-    this->get_parameter_or("historyKeyframeSearchNum", historyKeyframeSearchNum, historyKeyframeSearchNum);
-    this->get_parameter_or("historyKeyframeSearchTimeDiff", historyKeyframeSearchTimeDiff, historyKeyframeSearchTimeDiff);
-    this->get_parameter_or("historyKeyframeFitnessScore", historyKeyframeFitnessScore, historyKeyframeFitnessScore);
-    
-    RCLCPP_INFO(this->get_logger(), "Initializing Loop Closure with parameters: radius=%f, num=%d, timeDiff=%f, fitnessScore=%f",
-        historyKeyframeSearchRadius, historyKeyframeSearchNum, historyKeyframeSearchTimeDiff, historyKeyframeFitnessScore);
-    
-    // 루프 클로저 초기화 - DB 관리자 전달
-    loop_closure_ = std::make_unique<LoopClosure>(
-        this,
-        historyKeyframeSearchRadius,
-        historyKeyframeSearchNum,
-        historyKeyframeSearchTimeDiff,
-        historyKeyframeFitnessScore,
-        use_database_mode_ ? db_manager_.get() : nullptr  // DB 관리자 전달
-    );
-    
-    // DB 모드 설정
-    if (loop_closure_) {
-        loop_closure_->setDBMode(use_database_mode_);
-        RCLCPP_INFO(this->get_logger(), "Loop Closure 모듈 DB 모드: %s", use_database_mode_ ? "활성화" : "비활성화");
+    // Loop Closure 모듈 초기화 - SLAM 모드에서만 활성화
+    if (!localization_mode_) {
+        double historyKeyframeSearchRadius = 10.0;
+        int historyKeyframeSearchNum = 25;
+        double historyKeyframeSearchTimeDiff = 30.0;
+        double historyKeyframeFitnessScore = 0.3;
+        
+        // ParamServer에서 이미 선언된 파라미터를 가져옵니다
+        this->get_parameter_or("historyKeyframeSearchRadius", historyKeyframeSearchRadius, historyKeyframeSearchRadius);
+        this->get_parameter_or("historyKeyframeSearchNum", historyKeyframeSearchNum, historyKeyframeSearchNum);
+        this->get_parameter_or("historyKeyframeSearchTimeDiff", historyKeyframeSearchTimeDiff, historyKeyframeSearchTimeDiff);
+        this->get_parameter_or("historyKeyframeFitnessScore", historyKeyframeFitnessScore, historyKeyframeFitnessScore);
+        
+        RCLCPP_INFO(this->get_logger(), "Initializing Loop Closure with parameters: radius=%f, num=%d, timeDiff=%f, fitnessScore=%f",
+            historyKeyframeSearchRadius, historyKeyframeSearchNum, historyKeyframeSearchTimeDiff, historyKeyframeFitnessScore);
+        
+        // 루프 클로저 초기화 - DB 관리자 전달
+        loop_closure_ = std::make_unique<LoopClosure>(
+            this,
+            historyKeyframeSearchRadius,
+            historyKeyframeSearchNum,
+            historyKeyframeSearchTimeDiff,
+            historyKeyframeFitnessScore,
+            use_database_mode_ ? db_manager_.get() : nullptr  // DB 관리자 전달
+        );
+        
+        // DB 모드 설정
+        if (loop_closure_) {
+            loop_closure_->setDBMode(use_database_mode_);
+            RCLCPP_INFO(this->get_logger(), "Loop Closure 모듈 DB 모드: %s", use_database_mode_ ? "활성화" : "비활성화");
+        }
     }
 }
 
@@ -242,68 +256,233 @@ void mapOptimization::allocateMemory()
         matP = cv::Mat(6, 6, CV_32F, cv::Scalar::all(0));
     }
 
-void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedPtr msgIn)
-    {
-        // extract time stamp
-        timeLaserInfoStamp = msgIn->header.stamp;
-        timeLaserInfoCur = msgIn->header.stamp.sec + msgIn->header.stamp.nanosec * 1e-9;
+void mapOptimization::initializeForSLAM()
+{
+    // SLAM 모드에서만 필요한 subscriber, publisher, service
+    srvSaveMap = create_service<liorf::srv::SaveMap>("liorf/save_map",
+                    std::bind(&mapOptimization::saveMapService, this, std::placeholders::_1, std::placeholders::_2 ));
+    // ... Loop closure 관련 publisher 등
+}
 
-        // extract info and feature cloud
-        cloudInfo = *msgIn;
-        
-        // 메모리 효율성을 위해 클라우드 복사 전 clear 수행
-        if (laserCloudSurfLast) laserCloudSurfLast->clear();
-        
-        pcl::fromROSMsg(msgIn->cloud_deskewed, *laserCloudSurfLast);
+void mapOptimization::initializeForLocalization()
+{
+    // 전역 지도와 KD-Tree 초기화
+    globalMapCloud_.reset(new pcl::PointCloud<PointType>());
+    kdtreeGlobalMap_.reset(new pcl::KdTreeFLANN<PointType>());
 
-        std::lock_guard<std::mutex> lock(mtx);
-
-        static double timeLastProcessing = -1;
-        if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval) {
-            timeLastProcessing = timeLaserInfoCur;
-
-            updateInitialGuess();
-
-            // 주변 키프레임 추출 - 함수 복원
-            extractSurroundingKeyFrames();
-
-            // 포인트 클라우드 다운샘플링으로 메모리 사용량 및 계산량 감소
-            downsampleCurrentScan();
-
-            scan2MapOptimization();
-
-            saveKeyFramesAndFactor();
-
-            correctPoses();
-
-            // 메모리 관리: 너무 오래된 프레임 제거
-            clearOldFrames();
-
-            publishOdometry();
-
-            publishFrames();
-        }
-    
-    // 코스트맵 생성기에 데이터 전달
-    if (costmap_generator_ && !surfCloudKeyFrames.empty() && cloudKeyPoses3D && cloudKeyPoses6D) {
-        // PCL의 points 멤버를 std::vector<PointTypePose>로 변환
-        std::vector<PointTypePose> keyPoses6DVector(cloudKeyPoses6D->points.begin(), cloudKeyPoses6D->points.end());
-        
-        // 코스트맵 데이터 업데이트
-        costmap_generator_->processClouds(cloudKeyPoses3D, surfCloudKeyFrames, keyPoses6DVector);
+    // 전역 지도 파일 로드
+    std::string global_map_path = this->declare_parameter<std::string>("global_map_path", "");
+    if (global_map_path.empty() || pcl::io::loadPCDFile<PointType>(global_map_path, *globalMapCloud_) == -1) {
+        RCLCPP_FATAL(this->get_logger(), "Localization mode requires a global map. Please provide 'global_map_path'. Shutting down.");
+        rclcpp::shutdown();
+        return;
     }
-    
-    // Loop Closure 모듈에 데이터 전달
-    if (loop_closure_ && cloudKeyPoses3D && cloudKeyPoses6D) {
-        if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
-            // DB 모드 - 포즈 정보만 전달
-            loop_closure_->setInputDataWithDB(cloudKeyPoses3D, cloudKeyPoses6D, timeLaserInfoCur);
-            RCLCPP_DEBUG(this->get_logger(), "Publishing map: Loop closure using DB mode");
-        } else if (!surfCloudKeyFrames.empty()) {
-            // 기존 메모리 모드
-            loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur);
-            RCLCPP_DEBUG(this->get_logger(), "Publishing map: Loop closure using memory-only mode");
+    RCLCPP_INFO(this->get_logger(), "Global map loaded successfully: %ld points", globalMapCloud_->size());
+
+    // 전역 지도 KD-Tree 생성
+    kdtreeGlobalMap_->setInputCloud(globalMapCloud_);
+
+    // 초기 위치 입력을 받기 위한 subscriber 생성
+    subInitialPose_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+        "/initialpose", 1, std::bind(&mapOptimization::initialPoseHandler, this, std::placeholders::_1));
+
+    // 전역 지도를 시각화하기 위한 publisher
+    pubGlobalMap = create_publisher<sensor_msgs::msg::PointCloud2>("liorf/localization/global_map", 1);
+    // 타이머를 이용해 주기적으로 전역 지도 발행
+    auto timer_callback = [this]()->void{
+        if (pubGlobalMap->get_subscription_count() > 0) {
+            publishCloud(pubGlobalMap, globalMapCloud_, this->now(), odometryFrame);
         }
+    };
+    rclcpp::TimerBase::SharedPtr timer = this->create_wall_timer(5s, timer_callback);
+}
+
+void mapOptimization::laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedPtr msgIn)
+{
+    // 1. 데이터 준비 (가장 먼저 수행)
+    timeLaserInfoStamp = msgIn->header.stamp;
+    timeLaserInfoCur = rclcpp::Time(timeLaserInfoStamp).seconds();
+    pcl::fromROSMsg(msgIn->cloud_deskewed, *laserCloudSurfLast);
+    cloudInfo = *msgIn;
+
+    // 2. 메인 스레드 락
+    std::lock_guard<std::mutex> lock(mtx);
+
+    // 3. Localization 모드 처리
+    if (localization_mode_)
+    {
+        // 3.1. 새로운 초기 위치 요청이 있는지 확인
+        bool new_pose_received = false;
+        {
+            std::lock_guard<std::mutex> pose_lock(initial_pose_mutex_);
+            if (has_new_initial_pose_) {
+                new_pose_received = true;
+                has_new_initial_pose_ = false; // 플래그를 즉시 리셋
+            }
+        }
+
+        if (new_pose_received)
+        {
+            // 이 함수에서 실제 초기화 수행
+            if (initializeLocalization()) {
+                RCLCPP_INFO(this->get_logger(), "Localization successfully initialized.");
+                localization_initialized_ = true;
+            } else {
+                RCLCPP_ERROR(this->get_logger(), "Localization initialization failed. Please provide a new initial pose.");
+                localization_initialized_ = false;
+            }
+        }
+
+        // 3.2. 초기화가 완료되었는지 확인하고 위치 추정 실행
+        if (localization_initialized_)
+        {
+            static double timeLastProcessing = -1;
+            if (timeLaserInfoCur - timeLastProcessing < mappingProcessInterval) {
+                return;
+            }
+            timeLastProcessing = timeLaserInfoCur;
+            runLocalization();
+        } else {
+             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Localization mode: Waiting for initial pose from Rviz...");
+        }
+    } else { // 4. SLAM 모드 처리
+        static double timeLastProcessing = -1;
+        if (timeLaserInfoCur - timeLastProcessing < mappingProcessInterval) {
+            return;
+        }
+        timeLastProcessing = timeLaserInfoCur;
+        runSLAM();
+    }
+
+    // 코스트맵 생성기에 데이터 전달
+    if (costmap_generator_ && !laserCloudSurfLast->empty()) {
+        costmap_generator_->updateMapSize(laserCloudSurfLast);
+    }
+
+    // Loop Closure 모듈에 데이터 전달
+    if (loop_closure_ && !laserCloudSurfLast->empty()) {
+        // 필요한 데이터 준비
+        pcl::PointCloud<PointType>::Ptr keyPoses3D(new pcl::PointCloud<PointType>());
+        pcl::PointCloud<PointTypePose>::Ptr keyPoses6D(new pcl::PointCloud<PointTypePose>());
+        std::vector<pcl::PointCloud<PointType>::Ptr> surfCloudKeyFrames;
+        
+        // 현재 포즈를 PointTypePose로 변환
+        PointTypePose currentPose = trans2PointTypePose(transformTobeMapped);
+        keyPoses6D->push_back(currentPose);
+        
+        // 현재 스캔을 키프레임으로 추가
+        surfCloudKeyFrames.push_back(laserCloudSurfLast);
+        
+        // Loop Closure에 데이터 전달
+        loop_closure_->setInputData(keyPoses3D, keyPoses6D, surfCloudKeyFrames, timeLaserInfoCur, laserCloudSurfLast);
+    }
+}
+
+bool mapOptimization::initializeLocalization()
+{
+    RCLCPP_INFO(this->get_logger(), "Processing initial pose using the latest cloud scan...");
+
+    // 멤버 변수를 지역 변수로 복사 (스레드 안전성)
+    geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr current_initial_pose;
+    {
+        std::lock_guard<std::mutex> lock(initial_pose_mutex_);
+        current_initial_pose = initial_pose_msg_;
+    }
+
+    // 1. 저장된 메시지에서 초기 위치를 배열에 저장
+    tf2::Quaternion q;
+    tf2::fromMsg(current_initial_pose->pose.pose.orientation, q);
+    tf2::Matrix3x3 m(q);
+    double roll, pitch, yaw;
+    m.getRPY(roll, pitch, yaw);
+
+    float initial_pose_arr[6];
+    initial_pose_arr[0] = roll;
+    initial_pose_arr[1] = pitch;
+    initial_pose_arr[2] = yaw;
+    initial_pose_arr[3] = current_initial_pose->pose.pose.position.x;
+    initial_pose_arr[4] = current_initial_pose->pose.pose.position.y;
+    initial_pose_arr[5] = current_initial_pose->pose.pose.position.z;
+
+    // 2. 현재 스캔과 전역 지도를 이용해 ICP 정밀 정합 수행
+    downsampleCurrentScan(); // 현재 스캔(laserCloudSurfLast) 다운샘플링
+
+    if (laserCloudSurfLastDS->empty()) {
+        RCLCPP_ERROR(this->get_logger(), "Cannot initialize localization, current laser scan is empty.");
+        return false;
+    }
+
+    pcl::PointCloud<PointType>::Ptr source_cloud(new pcl::PointCloud<PointType>());
+    pcl::transformPointCloud(*laserCloudSurfLastDS, *source_cloud, trans2Affine3f(initial_pose_arr));
+    
+    pcl::IterativeClosestPoint<PointType, PointType> icp;
+    icp.setMaxCorrespondenceDistance(5.0); // 초기 추정이므로 약간 넓게 설정
+    icp.setMaximumIterations(100);
+    icp.setTransformationEpsilon(1e-6);
+    icp.setEuclideanFitnessEpsilon(1e-6);
+    icp.setInputSource(source_cloud);
+    icp.setInputTarget(globalMapCloud_);
+
+    pcl::PointCloud<PointType>::Ptr result(new pcl::PointCloud<PointType>());
+    icp.align(*result);
+
+    RCLCPP_INFO(this->get_logger(), "ICP for initialization: has_converged=%d, fitness_score=%f", icp.hasConverged(), icp.getFitnessScore());
+
+    if (icp.hasConverged() && icp.getFitnessScore() < 1.0) // 임계값은 환경에 맞게 튜닝 필요
+    {
+        // Matrix4를 Affine3f로 변환
+        Eigen::Matrix4f correction_matrix = icp.getFinalTransformation();
+        Eigen::Affine3f correction;
+        correction.matrix() = correction_matrix;
+        
+        Eigen::Affine3f final_pose = correction * trans2Affine3f(initial_pose_arr);
+        pcl::getTranslationAndEulerAngles(final_pose, transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5],
+                                          transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
+
+        // --- 여기에 gtsam 초기화 로직 추가 ---
+        resetOptimization(); // gtsam 상태를 완전히 리셋
+        
+        // 현재 보정된 위치를 그래프의 첫 번째 노드로 강력하게 고정 (PriorFactor)
+        noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances(
+            (gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6).finished());
+        gtSAMgraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
+        initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
+
+        // 그래프 업데이트
+        isam->update(gtSAMgraph, initialEstimate);
+        isam->update(); // isam 내부 상태를 확실히 업데이트
+
+        // 그래프와 초기 추정값 비우기
+        gtSAMgraph.resize(0);
+        initialEstimate.clear();
+        
+        // 첫 번째 키프레임 정보를 수동으로 저장 (그래프의 0번 노드와 일치시키기 위해)
+        PointType thisPose3D;
+        thisPose3D.x = transformTobeMapped[3];
+        thisPose3D.y = transformTobeMapped[4];
+        thisPose3D.z = transformTobeMapped[5];
+        thisPose3D.intensity = 0; // index 0
+        cloudKeyPoses3D->push_back(thisPose3D);
+
+        PointTypePose thisPose6D = trans2PointTypePose(transformTobeMapped);
+        thisPose6D.intensity = 0;
+        thisPose6D.time = timeLaserInfoCur;
+        cloudKeyPoses6D->push_back(thisPose6D);
+
+        // 첫 번째 프레임의 포인트 클라우드도 저장
+        pcl::PointCloud<PointType>::Ptr thisSurfKeyFrame(new pcl::PointCloud<PointType>());
+        pcl::copyPointCloud(*laserCloudSurfLastDS, *thisSurfKeyFrame);
+        surfCloudKeyFrames.push_back(thisSurfKeyFrame);
+        
+        // 경로 초기화
+        updatePath(thisPose6D);
+
+        RCLCPP_INFO(this->get_logger(), "GTSAM graph initialized for localization.");
+        
+        return true;
+    } else {
+        RCLCPP_ERROR(this->get_logger(), "ICP failed to converge for initial pose. Please try again with a better estimate.");
+        return false;
     }
 }
 
@@ -548,7 +727,8 @@ void mapOptimization::visualizeGlobalMapThread()
             publishGlobalMap();
         }
 
-        if (savePCD == false)
+        // 로컬라이제이션 모드에서는 PCD 파일을 저장하지 않음
+        if (savePCD == false || localization_mode_)
             return;
 
         std::shared_ptr<liorf::srv::SaveMap::Request> req = std::make_unique<liorf::srv::SaveMap::Request>();
@@ -838,6 +1018,10 @@ void mapOptimization::addLoopFactor()
 
 void mapOptimization::saveKeyFramesAndFactor()
     {
+        if (localization_mode_) { // Localization 모드에서는 아무것도 하지 않음
+            return;
+        }
+
         if (saveFrame() == false)
             return;
 
@@ -1307,6 +1491,12 @@ void mapOptimization::updateInitialGuess()
     // save current transformation before any processing
     incrementalOdometryAffineFront = trans2Affine3f(transformTobeMapped);
 
+    // Localization 모드에서는 이 함수가 위치를 덮어쓰지 않도록 함
+    if (localization_mode_) {
+        return;
+    }
+
+    // --- 이하 SLAM 모드 전용 로직 ---
     static Eigen::Affine3f lastImuTransformation;
     // initialization
     if (cloudKeyPoses3D->points.empty())
@@ -1318,7 +1508,7 @@ void mapOptimization::updateInitialGuess()
         if (!useImuHeadingInitialization)
             transformTobeMapped[2] = 0;
 
-        lastImuTransformation = pcl::getTransformation(0, 0, 0, cloudInfo.imurollinit, cloudInfo.imupitchinit, cloudInfo.imuyawinit); // save imu before return;
+        lastImuTransformation = pcl::getTransformation(0, 0, 0, cloudInfo.imurollinit, cloudInfo.imupitchinit, cloudInfo.imuyawinit);
         return;
     }
 
@@ -1341,10 +1531,9 @@ void mapOptimization::updateInitialGuess()
                                                         transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
 
             lastImuPreTransformation = transBack;
-
-            lastImuTransformation = pcl::getTransformation(0, 0, 0, cloudInfo.imurollinit, cloudInfo.imupitchinit, cloudInfo.imuyawinit); // save imu before return;
-            return;
         }
+        lastImuTransformation = pcl::getTransformation(0, 0, 0, cloudInfo.imurollinit, cloudInfo.imupitchinit, cloudInfo.imuyawinit);
+        return;
     }
 
     // use imu incremental estimation for pose guess (only rotation)
@@ -1358,7 +1547,7 @@ void mapOptimization::updateInitialGuess()
         pcl::getTranslationAndEulerAngles(transFinal, transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5], 
                                                     transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
 
-        lastImuTransformation = pcl::getTransformation(0, 0, 0, cloudInfo.imurollinit, cloudInfo.imupitchinit, cloudInfo.imuyawinit); // save imu before return;
+        lastImuTransformation = pcl::getTransformation(0, 0, 0, cloudInfo.imurollinit, cloudInfo.imupitchinit, cloudInfo.imuyawinit);
         return;
     }
 }
@@ -1808,4 +1997,164 @@ bool mapOptimization::LMOptimization(int iterCount)
         return true; // converged
     }
     return false; // keep optimizing
+}
+
+void mapOptimization::initialPoseHandler(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
+{
+    if (!localization_mode_) return;
+
+    std::lock_guard<std::mutex> lock(initial_pose_mutex_);
+    initial_pose_msg_ = msg;
+    has_new_initial_pose_ = true;
+    RCLCPP_INFO(this->get_logger(), "New initial pose received. Will be processed with the next cloud scan.");
+}
+
+void mapOptimization::runSLAM()
+{
+    static double timeLastProcessing = -1;
+    if (timeLaserInfoCur - timeLastProcessing < mappingProcessInterval) return;
+    timeLastProcessing = timeLaserInfoCur;
+
+    updateInitialGuess();
+    extractSurroundingKeyFrames(); // SLAM: 최신 키프레임 기반 지역 지도 생성
+    downsampleCurrentScan();
+    scan2MapOptimization();
+    saveKeyFramesAndFactor();      // SLAM: 지도 확장 및 gtsam 팩터 추가
+    correctPoses();
+    clearOldFrames();
+    publishOdometry();
+    publishFrames();
+}
+
+void mapOptimization::runLocalization()
+{
+    updateInitialGuess();
+    extractGlobalMapForLocalization();
+    
+    if (laserCloudSurfFromMapDSNum < 30) {
+        RCLCPP_WARN(this->get_logger(), "Not enough points from global map for localization.");
+        publishOdometry(); // 이전 위치라도 계속 발행
+        return;
+    }
+    
+    downsampleCurrentScan();
+    scan2MapOptimization(); // 이 함수는 transformTobeMapped를 업데이트
+
+    // --- Localization을 위한 그래프 업데이트 로직 추가 ---
+    // 1. Odometry Factor 추가 (이전 키프레임과 현재 프레임 간의 관계)
+    gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->back());
+    gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
+    
+    noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances(
+        (gtsam::Vector(6) << 1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2).finished()); // SLAM보다 약간 더 큰 노이즈
+    
+    int lastKeyframeIndex = cloudKeyPoses6D->size() - 1;
+    gtSAMgraph.add(BetweenFactor<Pose3>(lastKeyframeIndex, lastKeyframeIndex + 1, poseFrom.between(poseTo), odometryNoise));
+
+    // 2. 새로운 노드를 그래프에 추가
+    initialEstimate.insert(lastKeyframeIndex + 1, poseTo);
+    isam->update(gtSAMgraph, initialEstimate);
+    isam->update();
+    gtSAMgraph.resize(0);
+    initialEstimate.clear();
+
+    // 3. ISAM2로부터 최적화된 현재 포즈를 가져옴
+    isamCurrentEstimate = isam->calculateEstimate();
+    Pose3 latestEstimate = isamCurrentEstimate.at<Pose3>(lastKeyframeIndex + 1);
+    
+    // 시스템의 현재 위치(transformTobeMapped)를 최적화된 값으로 업데이트
+    transformTobeMapped[0] = latestEstimate.rotation().roll();
+    transformTobeMapped[1] = latestEstimate.rotation().pitch();
+    transformTobeMapped[2] = latestEstimate.rotation().yaw();
+    transformTobeMapped[3] = latestEstimate.translation().x();
+    transformTobeMapped[4] = latestEstimate.translation().y();
+    transformTobeMapped[5] = latestEstimate.translation().z();
+
+    // 4. 새로운 키프레임 정보 저장 (궤적 시각화를 위해)
+    PointType thisPose3D;
+    thisPose3D.x = transformTobeMapped[3];
+    thisPose3D.y = transformTobeMapped[4];
+    thisPose3D.z = transformTobeMapped[5];
+    thisPose3D.intensity = cloudKeyPoses3D->size();
+    cloudKeyPoses3D->push_back(thisPose3D);
+
+    PointTypePose thisPose6D = trans2PointTypePose(transformTobeMapped);
+    thisPose6D.intensity = thisPose3D.intensity;
+    thisPose6D.time = timeLaserInfoCur;
+    cloudKeyPoses6D->push_back(thisPose6D);
+
+    pcl::PointCloud<PointType>::Ptr thisSurfKeyFrame(new pcl::PointCloud<PointType>());
+    pcl::copyPointCloud(*laserCloudSurfLastDS, *thisSurfKeyFrame);
+    surfCloudKeyFrames.push_back(thisSurfKeyFrame);
+    
+    updatePath(thisPose6D);
+
+    publishOdometry();
+    publishFrames();
+}
+
+// Localization 모드용 함수
+void mapOptimization::extractGlobalMapForLocalization()
+{
+    laserCloudSurfFromMap->clear();
+    laserCloudSurfFromMapDS->clear();
+
+    if (!localization_initialized_ || globalMapCloud_->empty()) {
+        laserCloudSurfFromMapDSNum = 0;
+        return;
+    }
+
+    PointType current_pose_point;
+    current_pose_point.x = transformTobeMapped[3];
+    current_pose_point.y = transformTobeMapped[4];
+    current_pose_point.z = transformTobeMapped[5];
+
+    // --- 방어 코드 추가 ---
+    if (!pcl::isFinite(current_pose_point)) {
+        RCLCPP_ERROR(this->get_logger(), "Invalid pose for radius search: contains NaN or Inf!");
+        laserCloudSurfFromMapDSNum = 0;
+        return;
+    }
+
+    std::vector<int> pointSearchInd;
+    std::vector<float> pointSearchSqDis;
+    kdtreeGlobalMap_->radiusSearch(current_pose_point, surroundingKeyframeSearchRadius_, pointSearchInd, pointSearchSqDis);
+
+    for (int i = 0; i < (int)pointSearchInd.size(); ++i)
+    {
+        laserCloudSurfFromMap->push_back(globalMapCloud_->points[pointSearchInd[i]]);
+    }
+
+    // Downsample the surrounding cloud
+    laserCloudSurfFromMapDS->clear();
+    downSizeFilterLocalMapSurf.setInputCloud(laserCloudSurfFromMap);
+    downSizeFilterLocalMapSurf.filter(*laserCloudSurfFromMapDS);
+    laserCloudSurfFromMapDSNum = laserCloudSurfFromMapDS->size();
+}
+
+void mapOptimization::resetOptimization()
+{
+    RCLCPP_INFO(this->get_logger(), "Resetting GTSAM graph and optimization states.");
+    
+    gtSAMgraph.resize(0);
+    initialEstimate.clear();
+    
+    // isam 객체를 안전하게 삭제하고 새로 생성
+    if (isam) {
+        delete isam;
+    }
+    ISAM2Params parameters;
+    parameters.relinearizeThreshold = 0.1;
+    parameters.relinearizeSkip = 1;
+    isam = new ISAM2(parameters);
+
+    // SLAM 상태 변수들도 모두 초기화
+    cloudKeyPoses3D->clear();
+    cloudKeyPoses6D->clear();
+    surfCloudKeyFrames.clear();
+    laserCloudMapContainer.clear();
+    globalPath.poses.clear();
+    
+    // 기타 상태 변수 초기화
+    aLoopIsClosed = false;
 }

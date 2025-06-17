@@ -8,6 +8,7 @@
 #include "liorf/srv/save_map.hpp"
 // <!-- liorf_yjz_lucky_boy -->
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/slam/PriorFactor.h>
@@ -150,10 +151,28 @@ public:
     // 데이터베이스 관련 변수
     std::unique_ptr<DBManager> db_manager_; // 데이터베이스 관리자
     bool use_database_mode_; // 데이터베이스 모드 활성화 여부
-    bool localization_mode_; // 로컬라이제이션 모드 여부
+    bool localization_mode_ = false;              // 로컬라이제이션 모드 여부
     int active_keyframes_window_size_; // 메모리에 유지할 키프레임 수
     int active_loop_features_window_size_; // 메모리에 유지할 루프 특징점 수
     double spatial_query_radius_; // 공간 쿼리 반경
+
+    // --- Localization Mode를 위한 변수 추가 ---
+    bool localization_initialized_ = false;       // 로컬라이제이션 초기화 여부
+    bool has_new_initial_pose_ = false;          // 새로운 초기 위치 수신 여부
+    geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr initial_pose_msg_;  // 초기 위치 메시지
+    std::mutex initial_pose_mutex_;              // 초기 위치 관련 뮤텍스
+    float globalMapLeafSize_ = 0.2;              // 전역 지도 다운샘플링 크기
+    float surroundingKeyframeSearchRadius_ = 50.0;  // 주변 키프레임 검색 반경
+    float surroundingKeyframeMapLeafSize_ = 0.2;  // 주변 키프레임 지도 다운샘플링 크기
+    std::string localizationInitialPoseTopic_ = "/initialpose";  // 초기 위치 토픽
+    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr subInitialPose_;  // 초기 위치 구독자
+
+    // 전역 지도를 저장할 포인트 클라우드
+    pcl::PointCloud<PointType>::Ptr globalMapCloud_;  // 전역 지도 클라우드
+    pcl::KdTreeFLANN<PointType>::Ptr kdtreeGlobalMap_;
+
+    // 전역 지도 시각화를 위한 publisher
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubGlobalMap;
 
     mapOptimization(const rclcpp::NodeOptions & options);
 
@@ -199,6 +218,16 @@ public:
     void initializeDBManager();
     void loadKeyFramesFromDB();
     void updateActiveWindow(const PointTypePose& current_pose);
+
+    // --- Localization Mode를 위한 함수들 추가 ---
+    void initializeForSLAM();
+    void initializeForLocalization();
+    void initialPoseHandler(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
+    void runSLAM();
+    void runLocalization();
+    void extractGlobalMapForLocalization();
+    bool initializeLocalization();
+    void resetOptimization();
 };
 
 int main(int argc, char** argv); 
