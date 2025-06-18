@@ -1034,9 +1034,55 @@ void mapOptimization::addLoopFactor()
 
 void mapOptimization::saveKeyFramesAndFactor()
     {
-        if (localization_mode_) { // Localization 모드에서는 아무것도 하지 않음
-            return;
+        // Localization 모드에서는 키프레임을 저장하지 않지만, gtsam 최적화와 상태 업데이트는 수행해야 함
+        if (localization_mode_) {
+            // odom factor와 gps factor는 이미 runLocalization에서 호출됨
+            // 여기서는 gtsam 그래프 업데이트만 수행
+            isam->update(gtSAMgraph, initialEstimate);
+            isam->update();
+
+            gtSAMgraph.resize(0);
+            initialEstimate.clear();
+
+            // 최적화된 현재 포즈를 얻어옴
+            PointTypePose thisPose6D;
+            Pose3 latestEstimate;
+            isamCurrentEstimate = isam->calculateEstimate();
+            latestEstimate = isamCurrentEstimate.at<Pose3>(isamCurrentEstimate.size()-1);
+
+            // 현재 포즈를 transformTobeMapped에 업데이트 (이것이 핵심)
+            transformTobeMapped[0] = latestEstimate.rotation().roll();
+            transformTobeMapped[1] = latestEstimate.rotation().pitch();
+            transformTobeMapped[2] = latestEstimate.rotation().yaw();
+            transformTobeMapped[3] = latestEstimate.translation().x();
+            transformTobeMapped[4] = latestEstimate.translation().y();
+            transformTobeMapped[5] = latestEstimate.translation().z();
+            
+            // Localization 모드에서는 궤적을 계속 그려주기 위해 키프레임 정보를 추가
+            PointType thisPose3D;
+            thisPose3D.x = latestEstimate.translation().x();
+            thisPose3D.y = latestEstimate.translation().y();
+            thisPose3D.z = latestEstimate.translation().z();
+            thisPose3D.intensity = cloudKeyPoses3D->size();
+            cloudKeyPoses3D->push_back(thisPose3D);
+
+            thisPose6D.x = thisPose3D.x;
+            thisPose6D.y = thisPose3D.y;
+            thisPose6D.z = thisPose3D.z;
+            thisPose6D.intensity = thisPose3D.intensity;
+            thisPose6D.roll  = latestEstimate.rotation().roll();
+            thisPose6D.pitch = latestEstimate.rotation().pitch();
+            thisPose6D.yaw   = latestEstimate.rotation().yaw();
+            thisPose6D.time = timeLaserInfoCur;
+            cloudKeyPoses6D->push_back(thisPose6D);
+
+            // 경로 시각화를 위해 path 업데이트
+            updatePath(thisPose6D);
+
+            return; // Localization 모드 로직 끝
         }
+
+        // --- 이하 SLAM 모드 전용 로직 ---
 
         if (saveFrame() == false)
             return;
@@ -1134,6 +1180,18 @@ void mapOptimization::saveKeyFramesAndFactor()
 
         // save path for visualization
         updatePath(thisPose6D);
+
+        // --- Loop Closure 호출은 SLAM 모드에서만 ---
+        if (loop_closure_) {
+            pcl::PointCloud<PointType>::Ptr currentRawScan(new pcl::PointCloud<PointType>());
+            pcl::fromROSMsg(cloudInfo.cloud_deskewed, *currentRawScan);
+
+            if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
+                loop_closure_->setInputDataWithDB(cloudKeyPoses3D, cloudKeyPoses6D, timeLaserInfoCur, currentRawScan);
+            } else {
+                loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur, currentRawScan);
+            }
+        }
     }
 
 void mapOptimization::correctPoses()
@@ -2023,26 +2081,6 @@ void mapOptimization::runSLAM()
 
     // 지도 발행
     publishGlobalMap();
-
-    // Loop Closure 모듈에 데이터 전달 - saveKeyFramesAndFactor 이후에 호출하여 최신 데이터 사용
-    if (loop_closure_ && !surfCloudKeyFrames.empty())
-    {
-        RCLCPP_DEBUG(this->get_logger(), "Passing new keyframe data to loop closure module.");
-        
-        // 현재 스캔 준비 (SC Manager용)
-        pcl::PointCloud<PointType>::Ptr currentScan(new pcl::PointCloud<PointType>());
-        pcl::fromROSMsg(cloudInfo.cloud_deskewed, *currentScan);
-        
-        if (use_database_mode_ && db_manager_ && db_manager_->isInitialized()) {
-            // DB 모드 - 포즈 정보와 현재 스캔 전달
-            loop_closure_->setInputDataWithDB(cloudKeyPoses3D, cloudKeyPoses6D, timeLaserInfoCur, currentScan);
-            RCLCPP_DEBUG(this->get_logger(), "Loop closure using DB mode");
-        } else {
-            // 기존 메모리 모드 - 저장된 키프레임과 현재 스캔 사용
-            loop_closure_->setInputData(cloudKeyPoses3D, cloudKeyPoses6D, surfCloudKeyFrames, timeLaserInfoCur, currentScan);
-            RCLCPP_DEBUG(this->get_logger(), "Loop closure using memory-only mode");
-        }
-    }
 }
 
 void mapOptimization::runLocalization()
