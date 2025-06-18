@@ -689,8 +689,14 @@ void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKey
             
             if (cloud && !cloud->empty()) {
                 *nearKeyframes += *cloud;
+                RCLCPP_DEBUG(node_->get_logger(), "DB에서 키프레임 ID %d 로드 성공: %zu 포인트", start_idx, cloud->size());
             } else {
-                RCLCPP_ERROR(node_->get_logger(), "키프레임 ID %d: DB에서 로드 실패", start_idx);
+                RCLCPP_WARN(node_->get_logger(), "키프레임 ID %d: DB에서 로드 실패, 메모리 모드로 fallback", start_idx);
+                // DB 로드 실패 시 메모리 모드로 fallback
+                if (!surfCloudKeyFrames.empty() && start_idx < static_cast<int>(surfCloudKeyFrames.size()) && surfCloudKeyFrames[start_idx]) {
+                    *nearKeyframes += *surfCloudKeyFrames[start_idx];
+                    RCLCPP_DEBUG(node_->get_logger(), "메모리에서 키프레임 ID %d 로드 성공: %zu 포인트", start_idx, surfCloudKeyFrames[start_idx]->size());
+                }
             }
             
             return;
@@ -715,6 +721,7 @@ void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKey
         }
         
         // 각 키프레임 로드 및 합치기
+        int loaded_count = 0;
         for (int id : keyframe_ids) {
             if (id == start_idx) continue; // 시작점은 이미 추가했으므로 스킵
             
@@ -730,6 +737,23 @@ void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKey
             
             if (cloud && !cloud->empty()) {
                 *nearKeyframes += *cloud;
+                loaded_count++;
+            }
+        }
+        
+        // DB에서 로드된 키프레임이 부족한 경우 메모리 모드로 fallback
+        if (loaded_count < search_count / 2) {
+            RCLCPP_WARN(node_->get_logger(), "DB에서 로드된 키프레임 부족 (%d/%d), 메모리 모드로 fallback", loaded_count, search_count);
+            
+            // 메모리 모드로 fallback
+            for (int i = -search_count / 2; i <= search_count / 2; ++i) {
+                int keyNear = start_idx + i;
+                if (keyNear < 0 || keyNear >= cloudSize)
+                    continue;
+                    
+                if (keyNear < static_cast<int>(surfCloudKeyFrames.size()) && surfCloudKeyFrames[keyNear]) {
+                    *nearKeyframes += *surfCloudKeyFrames[keyNear];
+                }
             }
         }
     } else {
@@ -745,6 +769,7 @@ void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKey
         if (search_count == 0 || search_count == 1) {
             if (start_idx < static_cast<int>(surfCloudKeyFrames.size()) && surfCloudKeyFrames[start_idx]) {
                 *nearKeyframes += *surfCloudKeyFrames[start_idx];
+                RCLCPP_DEBUG(node_->get_logger(), "메모리에서 키프레임 ID %d 로드 성공: %zu 포인트", start_idx, surfCloudKeyFrames[start_idx]->size());
             } else {
                 RCLCPP_ERROR(node_->get_logger(), "키프레임 ID %d: 메모리에서 로드 실패", start_idx);
             }
@@ -770,6 +795,9 @@ void LoopClosure::loopFindNearKeyFrames(pcl::PointCloud<PointType>::Ptr& nearKey
         downSizeFilterICP.filter(*cloud_temp);
         *nearKeyframes = *cloud_temp;
     }
+    
+    RCLCPP_DEBUG(node_->get_logger(), "loopFindNearKeyFrames 완료: 키프레임 ID %d, 검색 개수 %d, 결과 포인트 수 %zu", 
+                start_idx, search_count, nearKeyframes->size());
 }
 
 void LoopClosure::visualizeLoopClosure()

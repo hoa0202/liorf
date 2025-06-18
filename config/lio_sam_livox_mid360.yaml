@@ -117,7 +117,7 @@
 
     # Database Settings
     use_database_mode: true                       # 데이터베이스 모드 활성화 여부 (true/false)
-    database_reset_on_start: false                # 시작할 때 데이터베이스 초기화 여부 (true: 완전 초기화 모드, false: 연속 매핑 모드)
+    database_reset_on_start: true                # 시작할 때 데이터베이스 초기화 여부 (true: 완전 초기화 모드, false: 연속 매핑 모드)
     localization_mode: false                       # 로컬라이제이션 모드 여부 (true: 기존 맵 유지, false: 새 맵 생성)
     database_path: "/root/dblio_ws/src/liorf/maps/slam_map.db" # 경로 수정금지 데이터베이스 파일 경로
     clouds_directory: "/root/dblio_ws/src/liorf/maps/clouds"   # 경로 수정금지 포인트 클라우드 저장 디렉토리 경로

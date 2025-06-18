@@ -172,7 +172,11 @@ public:
     pcl::KdTreeFLANN<PointType>::Ptr kdtreeGlobalMap_;
 
     // 전역 지도 시각화를 위한 publisher
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubGlobalMap;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubGlobalMap_;
+    rclcpp::TimerBase::SharedPtr map_publish_timer_;
+
+    // 전역 지도 다운샘플링을 위한 필터
+    pcl::VoxelGrid<PointType> downSizeFilterGlobalMap;
 
     mapOptimization(const rclcpp::NodeOptions & options);
 
@@ -228,6 +232,7 @@ public:
     void extractGlobalMapForLocalization();
     bool initializeLocalization();
     void resetOptimization();
+    bool loadGlobalMap();
 };
 
 int main(int argc, char** argv); 
