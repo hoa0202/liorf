@@ -54,7 +54,7 @@ public:
     NonlinearFactorGraph gtSAMgraph;
     Values initialEstimate;
     Values optimizedEstimate;
-    ISAM2 *isam;
+    std::unique_ptr<ISAM2> isam;
     Values isamCurrentEstimate;
     Eigen::MatrixXd poseCovariance;
 
@@ -179,9 +179,14 @@ public:
     // 전역 지도 다운샘플링을 위한 필터
     pcl::VoxelGrid<PointType> downSizeFilterGlobalMap;
 
+    // TF 변환 캐싱을 위한 멤버 변수
+    Eigen::Affine3f lidar_offset_transform_;
+    bool lidar_offset_initialized_ = false;
+
     mapOptimization(const rclcpp::NodeOptions & options);
 
     void allocateMemory();
+    void initializeLidarOffset(); // TF 변환 초기화 함수
     void laserCloudInfoHandler(const liorf::msg::CloudInfo::SharedPtr msgIn);
     void gpsHandler(const sensor_msgs::msg::NavSatFix::SharedPtr gpsMsg);
     void pointAssociateToMap(PointType const * const pi, PointType * const po);

@@ -34,7 +34,7 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
         ISAM2Params parameters;
         parameters.relinearizeThreshold = 0.1;
         parameters.relinearizeSkip = 1;
-        isam = new ISAM2(parameters);
+        isam = std::make_unique<ISAM2>(parameters);
 
         subCloud = create_subscription<liorf::msg::CloudInfo>("liorf/deskew/cloud_info", QosPolicy(history_policy, reliability_policy),
                     std::bind(&mapOptimization::laserCloudInfoHandler, this, std::placeholders::_1));
@@ -77,6 +77,9 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
 
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+        // TF 변환 초기화 - 한 번만 조회하여 재사용
+        initializeLidarOffset();
 
         allocateMemory();
         
@@ -227,6 +230,46 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
             this->visualizeGlobalMapThread();
         }).detach();
         RCLCPP_INFO(this->get_logger(), "전역 맵 시각화 스레드 시작됨 (0.2 Hz)");
+    }
+}
+
+// TF 변환 초기화 함수 추가
+void mapOptimization::initializeLidarOffset()
+{
+    RCLCPP_INFO(this->get_logger(), "Looking up transform from '%s' to '%s'", baselinkFrame.c_str(), lidarFrame.c_str());
+    try {
+        geometry_msgs::msg::TransformStamped transformStamped = 
+            tf_buffer_->lookupTransform(baselinkFrame, lidarFrame, tf2::TimePointZero, std::chrono::seconds(5));
+        
+        // TransformStamped를 Eigen::Affine3f로 변환
+        Eigen::Vector3f translation(
+            transformStamped.transform.translation.x,
+            transformStamped.transform.translation.y,
+            transformStamped.transform.translation.z
+        );
+        
+        Eigen::Quaternionf rotation(
+            transformStamped.transform.rotation.w,
+            transformStamped.transform.rotation.x,
+            transformStamped.transform.rotation.y,
+            transformStamped.transform.rotation.z
+        );
+        
+        lidar_offset_transform_.translation() = translation;
+        lidar_offset_transform_.linear() = rotation.toRotationMatrix();
+        lidar_offset_initialized_ = true;
+
+        // 로그로 변환 정보 확인
+        RCLCPP_INFO(this->get_logger(), "Successfully found lidar offset: T=[%.3f, %.3f, %.3f], Q=[%.3f, %.3f, %.3f, %.3f]",
+                    translation.x(), translation.y(), translation.z(),
+                    rotation.x(), rotation.y(), rotation.z(), rotation.w());
+
+    } catch (const tf2::TransformException &ex) {
+        RCLCPP_ERROR(this->get_logger(), "Could not transform %s to %s: %s. Using default values.", 
+                     baselinkFrame.c_str(), lidarFrame.c_str(), ex.what());
+        // TF를 찾지 못했을 경우 기본값 사용
+        lidar_offset_transform_ = pcl::getTransformation(0.23, 0.0, 0.805, 0, 0, 0);
+        lidar_offset_initialized_ = false; // 실패했음을 명시
     }
 }
 
@@ -586,55 +629,8 @@ pcl::PointCloud<PointType>::Ptr mapOptimization::transformPointCloudWithLidarOff
     Eigen::AngleAxisf rotZ(transformIn->yaw, Eigen::Vector3f::UnitZ());
     transCur.rotate(rotZ * rotY * rotX);
         
-        // 기본 LiDAR 오프셋 값 (TF를 찾지 못할 경우 사용)
-        float lidarOffsetX = 0.23;
-        float lidarOffsetY = 0.0;
-        float lidarOffsetZ = 0.805;
-        
-        Eigen::Affine3f lidarOffset = Eigen::Affine3f::Identity();
-        
-        try {
-            // TF에서 동적으로 base_link와 lidar_frame 사이의 변환 가져오기
-            geometry_msgs::msg::TransformStamped transformStamped;
-            transformStamped = tf_buffer_->lookupTransform(baselinkFrame, lidarFrame, tf2::TimePointZero);
-            
-            // TransformStamped를 Eigen::Affine3f로 변환
-            Eigen::Vector3f translation(
-                transformStamped.transform.translation.x,
-                transformStamped.transform.translation.y,
-                transformStamped.transform.translation.z
-            );
-            
-            Eigen::Quaternionf rotation(
-                transformStamped.transform.rotation.w,
-                transformStamped.transform.rotation.x,
-                transformStamped.transform.rotation.y,
-                transformStamped.transform.rotation.z
-            );
-            
-            lidarOffset.translation() = translation;
-            lidarOffset.linear() = rotation.toRotationMatrix();
-            
-            // Quaternion에서 Roll, Pitch, Yaw 추출
-            double roll, pitch, yaw;
-            tf2::Quaternion tf2Quat(
-                transformStamped.transform.rotation.x,
-                transformStamped.transform.rotation.y,
-                transformStamped.transform.rotation.z,
-                transformStamped.transform.rotation.w
-            );
-            tf2::Matrix3x3(tf2Quat).getRPY(roll, pitch, yaw);
-            
-        }
-    catch (const tf2::TransformException &ex) {
-        RCLCPP_WARN(this->get_logger(), "Could not transform from %s to %s: %s", baselinkFrame.c_str(), lidarFrame.c_str(), ex.what());
-        
-        // 기본값으로 변환 행렬 생성
-        lidarOffset.translation() << lidarOffsetX, lidarOffsetY, lidarOffsetZ;
-        }
-        
-        // 최종 변환 = 기존변환 * LiDAR오프셋
-        Eigen::Affine3f finalTransform = transCur * lidarOffset;
+        // 저장된 TF 변환을 직접 사용 (초기화 시 한 번만 조회)
+        Eigen::Affine3f finalTransform = transCur * lidar_offset_transform_;
         
         #pragma omp parallel for num_threads(numberOfCores)
         for (int i = 0; i < cloudSize; ++i)
@@ -1213,8 +1209,10 @@ void mapOptimization::correctPoses()
             laserCloudMapContainer.clear();
             // clear path
             globalPath.poses.clear();
-            // update key poses
             int numPoses = isamCurrentEstimate.size();
+            globalPath.poses.reserve(numPoses); // 메모리 미리 할당
+            
+            // update key poses
             for (int i = 0; i < numPoses; ++i)
             {
                 cloudKeyPoses3D->points[i].x = isamCurrentEstimate.at<Pose3>(i).translation().x();
@@ -1811,6 +1809,21 @@ void mapOptimization::extractSurroundingKeyFrames()
         }
 
         // 선택된 키프레임들의 포인트 클라우드를 변환하여 로컬 맵 생성
+        // 1. 최종 맵의 총 포인트 수 계산
+        size_t total_points = 0;
+        for (size_t i = 0; i < surroundingKeyPosesDS->size(); ++i)
+        {
+            int thisKeyInd = (int)surroundingKeyPosesDS->points[i].intensity;
+            if (thisKeyInd >= 0 && static_cast<size_t>(thisKeyInd) < surfCloudKeyFrames.size()) {
+                total_points += surfCloudKeyFrames[thisKeyInd]->size();
+            }
+        }
+
+        // 2. 최종 맵 클라우드 메모리 한 번에 할당
+        laserCloudSurfFromMap->clear();
+        laserCloudSurfFromMap->points.reserve(total_points);
+
+        // 3. 각 키프레임 클라우드를 변환하여 병합
         for (size_t i = 0; i < surroundingKeyPosesDS->size(); ++i)
         {
             int thisKeyInd = (int)surroundingKeyPosesDS->points[i].intensity;
@@ -2164,14 +2177,11 @@ void mapOptimization::resetOptimization()
     gtSAMgraph.resize(0);
     initialEstimate.clear();
     
-    // isam 객체를 안전하게 삭제하고 새로 생성
-    if (isam) {
-        delete isam;
-    }
+    // isam 객체를 새로 생성 (기존 객체는 자동으로 소멸)
     ISAM2Params parameters;
     parameters.relinearizeThreshold = 0.1;
     parameters.relinearizeSkip = 1;
-    isam = new ISAM2(parameters);
+    isam = std::make_unique<ISAM2>(parameters);
 
     // SLAM 상태 변수들도 모두 초기화
     cloudKeyPoses3D->clear();
