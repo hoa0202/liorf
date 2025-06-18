@@ -220,6 +220,14 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
             RCLCPP_INFO(this->get_logger(), "Loop Closure 모듈 DB 모드: %s", use_database_mode_ ? "활성화" : "비활성화");
         }
     }
+
+    // 전역 맵을 주기적으로 publish 하는 스레드 시작 (SLAM 모드에서만)
+    if (!localization_mode_) {
+        std::thread([this](){
+            this->visualizeGlobalMapThread();
+        }).detach();
+        RCLCPP_INFO(this->get_logger(), "전역 맵 시각화 스레드 시작됨 (0.2 Hz)");
+    }
 }
 
 void mapOptimization::allocateMemory()
@@ -2079,8 +2087,8 @@ void mapOptimization::runSLAM()
     publishOdometry();
     publishFrames();
 
-    // 지도 발행
-    publishGlobalMap();
+    // ----- 전역 맵 publish 제거 (별도 스레드로 분리) -----
+    // publishGlobalMap();
 }
 
 void mapOptimization::runLocalization()

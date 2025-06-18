@@ -30,6 +30,7 @@
 #include "Scancontext.h"
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <numeric> // for std::accumulate
+#include <thread> // 스레드 지원을 위한 헤더 추가
 
 using namespace gtsam;
 
